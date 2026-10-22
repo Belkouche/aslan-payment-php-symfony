@@ -31,10 +31,12 @@ final class WebhooksConfig
      * Optional params:
      *  - events (string[]) — event types to subscribe to (empty = all events)
      *    Common values:
-     *      checkout_session.completed, checkout_session.expired,
-     *      transaction.captured, transaction.failed,
-     *      refund.created, refund.succeeded, refund.failed,
-     *      payment_link.paid
+     *      payment.succeeded, payment.failed, payment.expired,
+     *      payment.pending_cash, payment.cash_late_confirmation,
+     *      refund.created, refund.updated,
+     *      subscription.renewed, subscription.payment_failed,
+     *      subscription.past_due, subscription.cancelled,
+     *      subscription.plan_changed, subscription.plan_change_failed
      *  - apiVersion (string) — pin the event payload format
      *
      * @param  array<string, mixed> $params

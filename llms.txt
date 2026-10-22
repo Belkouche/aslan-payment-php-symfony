@@ -1,0 +1,8 @@
+# Aslan Payment PHP SDK (aslan/payment-php)
+
+> Official PHP SDK for the Aslan Payment API (https://api.aslanpay.ma/pay). Amounts are integers in centimes (14900 = 149.00 MAD). Read AGENTS.md first: it holds the rules, decision table and canonical snippets for AI coding agents.
+
+- [AGENTS.md](AGENTS.md): invariants, intent-to-call table, snippets, anti-patterns
+- [README.md](README.md): full didactic guide (install, subscriptions, webhooks, API reference)
+- [CHANGELOG.md](CHANGELOG.md): release notes (0.2.0 fixes a fatal AslanException load error present in 0.1.0)
+- [composer.json](composer.json): PHP and dependency constraints (patched PHP required)
