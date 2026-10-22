@@ -11,15 +11,16 @@ namespace Aslan\Payment\Dto;
  * object you work with. The $data property contains the raw event data
  * exactly as delivered by the API.
  *
- * Common event types:
- *  - checkout_session.completed
- *  - checkout_session.expired
- *  - transaction.captured
- *  - transaction.failed
- *  - refund.created
- *  - refund.succeeded
- *  - refund.failed
- *  - payment_link.paid
+ * Event types (delivered in the body's `event` field):
+ *  - payment.succeeded, payment.failed, payment.expired,
+ *    payment.pending_cash, payment.cash_late_confirmation
+ *  - refund.created, refund.updated
+ *  - subscription.renewed, subscription.payment_failed, subscription.past_due,
+ *    subscription.cancelled, subscription.plan_changed,
+ *    subscription.plan_change_failed
+ *
+ * `subscription.*` events carry `{ subscription, transaction? }` in $data —
+ * use asSubscription() and $data['transaction'].
  */
 final readonly class WebhookEvent
 {
@@ -28,7 +29,8 @@ final readonly class WebhookEvent
         public string $id,
 
         /**
-         * Dot-separated event type, e.g. "checkout_session.completed"
+         * Dot-separated event type, e.g. "subscription.renewed"
+         * (the payload's `event` field).
          */
         public string $type,
 
@@ -38,7 +40,8 @@ final readonly class WebhookEvent
         public string $apiVersion,
 
         /**
-         * Unix timestamp when the event was generated on the server.
+         * Unix timestamp when the event was generated on the server
+         * (parsed from the payload's ISO 8601 `createdAt`).
          */
         public int $createdAt,
 
@@ -65,9 +68,9 @@ final readonly class WebhookEvent
     {
         return new self(
             id:         (string) ($payload['id']         ?? ''),
-            type:       (string) ($payload['type']       ?? ''),
+            type:       (string) ($payload['event']      ?? $payload['type']        ?? ''),
             apiVersion: (string) ($payload['apiVersion'] ?? $payload['api_version'] ?? ''),
-            createdAt:  (int)    ($payload['createdAt']  ?? $payload['created_at']  ?? time()),
+            createdAt:  self::parseTimestamp($payload['createdAt'] ?? $payload['created_at'] ?? null),
             data:       (array)  ($payload['data']       ?? []),
             rawPayload: $payload,
         );
@@ -84,7 +87,7 @@ final readonly class WebhookEvent
 
     public function asTransaction(): Transaction
     {
-        return Transaction::fromArray($this->data['object'] ?? $this->data);
+        return Transaction::fromArray($this->data['transaction'] ?? $this->data['object'] ?? $this->data);
     }
 
     public function asRefund(): Refund
@@ -95,5 +98,39 @@ final readonly class WebhookEvent
     public function asPaymentLink(): PaymentLink
     {
         return PaymentLink::fromArray($this->data['object'] ?? $this->data);
+    }
+
+    /** True for subscription.* events. */
+    public function isSubscriptionEvent(): bool
+    {
+        return str_starts_with($this->type, 'subscription.');
+    }
+
+    /**
+     * The (partial) subscription carried by a subscription.* event.
+     * Fields not present in the event payload are null / defaults.
+     */
+    public function asSubscription(): Subscription
+    {
+        return Subscription::fromArray($this->data['subscription'] ?? $this->data['object'] ?? $this->data);
+    }
+
+    /**
+     * Accepts a unix timestamp or an ISO 8601 string; falls back to now.
+     */
+    private static function parseTimestamp(mixed $value): int
+    {
+        if (is_int($value) || (is_string($value) && ctype_digit($value))) {
+            return (int) $value;
+        }
+
+        if (is_string($value)) {
+            $ts = strtotime($value);
+            if ($ts !== false) {
+                return $ts;
+            }
+        }
+
+        return time();
     }
 }

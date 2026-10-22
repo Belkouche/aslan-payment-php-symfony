@@ -18,18 +18,31 @@ namespace Aslan\Payment;
  *  - SERVER_ERROR           — unexpected server-side error (5xx)
  *  - NETWORK_ERROR          — connection / timeout failure
  *  - WEBHOOK_SIGNATURE_ERROR — webhook signature verification failed
+ *  - UNSUPPORTED_OPERATION  — the configured HTTP client lacks a needed capability
  */
 final class AslanException extends \RuntimeException
 {
+    /**
+     * @param string $errorCode  Machine-readable API error code (see list above).
+     *                           getCode() returns the HTTP status (int, 0 when none).
+     */
     public function __construct(
-        public readonly string $code,
+        public readonly string $errorCode,
         string $message,
         public readonly int $httpStatus = 0,
         public readonly array $details = [],
         public readonly ?string $requestId = null,
         ?\Throwable $previous = null,
     ) {
-        parent::__construct($message, 0, $previous);
+        parent::__construct($message, $httpStatus, $previous);
+    }
+
+    /**
+     * Machine-readable error code, e.g. "VALIDATION_ERROR".
+     */
+    public function getErrorCode(): string
+    {
+        return $this->errorCode;
     }
 
     // ------------------------------------------------------------------
@@ -91,7 +104,7 @@ final class AslanException extends \RuntimeException
      */
     public static function fromApiResponse(int $httpStatus, array $body, ?string $requestId = null): self
     {
-        $code    = $body['code']    ?? 'SERVER_ERROR';
+        $code    = (string) ($body['code'] ?? 'SERVER_ERROR');
         $message = $body['message'] ?? 'An error occurred';
         $details = $body['details'] ?? $body['errors'] ?? [];
 

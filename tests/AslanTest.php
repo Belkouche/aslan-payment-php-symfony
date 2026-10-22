@@ -561,12 +561,12 @@ final class AslanTest extends TestCase
     {
         $authEx = AslanException::authenticationError('Bad key', 401, 'req_001');
 
-        self::assertSame('AUTHENTICATION_ERROR', $authEx->code);
+        self::assertSame('AUTHENTICATION_ERROR', $authEx->errorCode);
         self::assertSame(401, $authEx->httpStatus);
         self::assertSame('req_001', $authEx->requestId);
 
         $validEx = AslanException::validationError('Invalid amount', ['amount' => 'must be positive']);
-        self::assertSame('VALIDATION_ERROR', $validEx->code);
+        self::assertSame('VALIDATION_ERROR', $validEx->errorCode);
         self::assertNotEmpty($validEx->details);
     }
 
@@ -578,7 +578,7 @@ final class AslanTest extends TestCase
             'details' => ['amount' => 'must be a positive integer'],
         ], 'req_xyz');
 
-        self::assertSame('VALIDATION_ERROR', $ex->code);
+        self::assertSame('VALIDATION_ERROR', $ex->errorCode);
         self::assertSame('amount must be positive', $ex->getMessage());
         self::assertSame(422, $ex->httpStatus);
         self::assertSame('req_xyz', $ex->requestId);

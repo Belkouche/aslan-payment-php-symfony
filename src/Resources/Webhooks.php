@@ -14,10 +14,10 @@ use Aslan\Payment\Dto\WebhookEvent;
  *
  *   $event = Aslan::webhooks($webhookSecret)->constructEvent(
  *       $rawBody,
- *       $request->headers->get('Aslan-Signature')
+ *       $request->headers->get('X-Webhook-Signature')
  *   );
  *
- * The signature header format is:  t=<unix_timestamp>,v1=<hmac_hex>
+ * The signature header (X-Webhook-Signature) format is:  t=<unix_timestamp>,v1=<hmac_hex>
  *
  * The signed payload is:  "{timestamp}.{rawBody}"
  *
@@ -28,7 +28,7 @@ use Aslan\Payment\Dto\WebhookEvent;
 final class Webhooks
 {
     /** Signature header name */
-    public const SIGNATURE_HEADER = 'Aslan-Signature';
+    public const SIGNATURE_HEADER = 'X-Webhook-Signature';
 
     /** Default tolerance window for the timestamp (in seconds) */
     public const DEFAULT_TOLERANCE = 300;
@@ -39,7 +39,7 @@ final class Webhooks
      * Parse and verify a webhook delivery.
      *
      * @param  string      $rawBody      The raw, un-decoded request body string
-     * @param  string      $sigHeader    Value of the "Aslan-Signature" header
+     * @param  string      $sigHeader    Value of the "X-Webhook-Signature" header
      * @param  int         $tolerance    Maximum age of the event in seconds (0 = no check)
      *
      * @return WebhookEvent              Verified, parsed event object
@@ -58,7 +58,7 @@ final class Webhooks
 
         if (empty($signatures)) {
             throw AslanException::webhookSignatureError(
-                'No v1 signatures found in the Aslan-Signature header.'
+                'No v1 signatures found in the X-Webhook-Signature header.'
             );
         }
 
@@ -108,7 +108,7 @@ final class Webhooks
     }
 
     /**
-     * Generate a valid Aslan-Signature header value for the given payload.
+     * Generate a valid X-Webhook-Signature header value for the given payload.
      *
      * Useful for testing your webhook handler: you can simulate incoming
      * Aslan webhook deliveries without hitting the real API.
@@ -140,7 +140,7 @@ final class Webhooks
     {
         if (trim($header) === '') {
             throw AslanException::webhookSignatureError(
-                'Aslan-Signature header is empty or missing.'
+                'X-Webhook-Signature header is empty or missing.'
             );
         }
 
@@ -169,7 +169,7 @@ final class Webhooks
 
         if ($result['t'] === 0) {
             throw AslanException::webhookSignatureError(
-                'Aslan-Signature header is missing the timestamp (t=) field.'
+                'X-Webhook-Signature header is missing the timestamp (t=) field.'
             );
         }
 

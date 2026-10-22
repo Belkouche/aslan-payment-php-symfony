@@ -8,20 +8,21 @@ use Aslan\Payment\AslanException;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface as SymfonyHttpClientInterface;
+use Symfony\Contracts\HttpClient\ResponseInterface;
 
 /**
  * Symfony HttpClient adapter for the Aslan Payment SDK.
  *
  * Features:
- *  - Automatic JSON encoding / decoding
+ *  - Automatic JSON encoding / decoding (plus raw bodies for PDF downloads)
  *  - Authorization & User-Agent headers injected on every request
  *  - Retry logic with exponential back-off on transient errors
  *    (408, 429, 500, 502, 503, 504) — up to $maxRetries attempts
  *  - Maps HTTP 4xx / 5xx responses to typed AslanException instances
  */
-final class SymfonyHttpClient implements HttpClientInterface
+final class SymfonyHttpClient implements HttpClientInterface, RawHttpClientInterface
 {
-    private const SDK_VERSION = '0.1.0';
+    private const SDK_VERSION = '0.2.0';
 
     /** HTTP status codes that should trigger a retry */
     private const RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
@@ -56,25 +57,67 @@ final class SymfonyHttpClient implements HttpClientInterface
         array $headers = [],
         array $query = [],
     ): array {
+        $options = [];
+
+        // Only send a JSON body (and therefore a JSON Content-Type) when there is
+        // one: the API rejects an empty body declared as application/json, which
+        // would break body-less POST / DELETE calls (e.g. subscription pause).
+        if (!empty($body) && strtoupper($method) !== 'GET') {
+            $options['json'] = $body;
+        }
+
+        $response = $this->send($method, $url, $headers, $query, $options);
+
+        return $this->decodeJson($response);
+    }
+
+    // ------------------------------------------------------------------
+    // RawHttpClientInterface
+    // ------------------------------------------------------------------
+
+    public function requestRaw(
+        string $method,
+        string $url,
+        array $headers = [],
+        array $query = [],
+    ): string {
+        $response = $this->send($method, $url, $headers, $query, []);
+
+        try {
+            return $response->getContent(false);
+        } catch (TransportExceptionInterface $e) {
+            throw AslanException::networkError(
+                'Network error communicating with Aslan API: ' . $e->getMessage(),
+                $e
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Internals
+    // ------------------------------------------------------------------
+
+    /**
+     * Send a request with retries and return the successful (2xx) response.
+     *
+     * @param  array<string, string> $headers
+     * @param  array<string, mixed>  $query
+     * @param  array<string, mixed>  $options Extra Symfony request options (e.g. json)
+     *
+     * @throws AslanException
+     */
+    private function send(string $method, string $url, array $headers, array $query, array $options): ResponseInterface
+    {
         $defaultHeaders = [
             'Authorization' => 'Bearer ' . $this->secretKey,
             'User-Agent'    => 'aslan-payment-php/' . self::SDK_VERSION,
             'Accept'        => 'application/json',
-            'Content-Type'  => 'application/json',
         ];
 
-        $mergedHeaders = array_merge($defaultHeaders, $headers);
-
-        $options = [
-            'headers' => $mergedHeaders,
-        ];
+        $options['headers'] = array_merge($defaultHeaders, $headers);
 
         if (!empty($query)) {
             $options['query'] = $query;
-        }
-
-        if (!empty($body) && strtoupper($method) !== 'GET') {
-            $options['json'] = $body;
         }
 
         $lastException = null;
@@ -87,25 +130,16 @@ final class SymfonyHttpClient implements HttpClientInterface
             }
 
             try {
-                $response    = $this->client->request($method, $url, $options);
-                $statusCode  = $response->getStatusCode();
-                $requestId   = $response->getHeaders(false)['x-request-id'][0] ?? null;
-                $contentType = $response->getHeaders(false)['content-type'][0] ?? '';
-
-                // Attempt to decode JSON regardless of status so we can surface
-                // structured error messages from the API.
-                $decoded = [];
-                if (str_contains($contentType, 'application/json')) {
-                    try {
-                        $decoded = $response->toArray(false);
-                    } catch (\Throwable) {
-                        // Fall through with empty array — raw body may not be valid JSON.
-                    }
-                }
+                $response   = $this->client->request($method, $url, $options);
+                $statusCode = $response->getStatusCode();
+                $requestId  = $response->getHeaders(false)['x-request-id'][0] ?? null;
 
                 if ($statusCode >= 200 && $statusCode < 300) {
-                    return $decoded;
+                    return $response;
                 }
+
+                // Decode the error body so we can surface structured API messages.
+                $decoded = $this->decodeJson($response);
 
                 // Check if we should retry transient server errors
                 if (in_array($statusCode, self::RETRYABLE_STATUSES, true) && $attempt < $this->maxRetries) {
@@ -134,9 +168,26 @@ final class SymfonyHttpClient implements HttpClientInterface
         throw $lastException ?? AslanException::serverError('Request failed after ' . $this->maxRetries . ' retries');
     }
 
-    // ------------------------------------------------------------------
-    // Internals
-    // ------------------------------------------------------------------
+    /**
+     * Decode a JSON response body; returns [] for non-JSON or invalid JSON.
+     *
+     * @return array<string, mixed>
+     */
+    private function decodeJson(ResponseInterface $response): array
+    {
+        $contentType = $response->getHeaders(false)['content-type'][0] ?? '';
+
+        if (!str_contains($contentType, 'application/json')) {
+            return [];
+        }
+
+        try {
+            return $response->toArray(false);
+        } catch (\Throwable) {
+            // Raw body may not be valid JSON.
+            return [];
+        }
+    }
 
     private function buildException(int $httpStatus, array $body, ?string $requestId): AslanException
     {

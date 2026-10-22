@@ -43,12 +43,17 @@ final readonly class PaginatedResponse
 
         $meta = $raw['meta'] ?? $raw['pagination'] ?? [];
 
+        $pageSize = (int) ($meta['pageSize']    ?? $meta['perPage']     ?? count($items));
+        $total    = (int) ($meta['total']       ?? $meta['totalItems']  ?? count($items));
+
         return new self(
             data:       $items,
             page:       (int) ($meta['page']       ?? $meta['currentPage'] ?? 1),
-            pageSize:   (int) ($meta['pageSize']    ?? $meta['perPage']     ?? count($items)),
-            total:      (int) ($meta['total']       ?? $meta['totalItems']  ?? count($items)),
-            totalPages: (int) ($meta['totalPages']  ?? $meta['lastPage']    ?? 1),
+            pageSize:   $pageSize,
+            total:      $total,
+            // Some endpoints (e.g. billing) return only total + pageSize.
+            totalPages: (int) ($meta['totalPages']  ?? $meta['lastPage']
+                ?? ($pageSize > 0 ? max(1, (int) ceil($total / $pageSize)) : 1)),
         );
     }
 

@@ -1,11 +1,11 @@
 # Aslan Payment PHP SDK
 
-Official PHP SDK for the [Aslan Payment API](https://aslanpay.ma). Accepts payments, manages payment links, issues refunds, and handles webhook events — all in a clean, type-safe PHP 8.1+ API.
+Official PHP SDK for the [Aslan Payment API](https://aslanpay.ma). Accepts payments, manages payment links, issues refunds, bills subscriptions, and handles webhook events — all in a clean, type-safe PHP 8.2+ API.
 
 ## Requirements
 
-- PHP 8.1 or higher
-- [Symfony HttpClient](https://symfony.com/doc/current/http_client.html) (`symfony/http-client ^6.0|^7.0`)
+- PHP **8.2.35+, 8.3.36+, 8.4.27+ or 8.5.12+** (see [Security](#security-minimum-php-patch-versions))
+- [Symfony HttpClient](https://symfony.com/doc/current/http_client.html) (`symfony/http-client ^6.4.15 || ^7.4 || ^8.1`)
 
 The SDK is designed to work seamlessly inside a Symfony application but is **not coupled to the Symfony framework**. You can use any PSR-18 compatible HTTP client by implementing the lightweight `HttpClientInterface`.
 
@@ -55,7 +55,7 @@ echo $link->url; // https://pay.aslanpay.ma/l/abc123
 ```php
 // In your webhook endpoint (e.g. a Symfony controller):
 $rawBody   = $request->getContent();
-$sigHeader = $request->headers->get('Aslan-Signature', '');
+$sigHeader = $request->headers->get('X-Webhook-Signature', '');
 
 try {
     $event = Aslan::webhooks($_ENV['ASLAN_WEBHOOK_SECRET'])
@@ -309,6 +309,142 @@ $aslan->apiKeys->delete('key_xxxxxxxxxxxxxxxx');
 
 ---
 
+### Subscriptions (Plans, Subscriptions, Billing attempts, Invoices)
+
+Recurring card billing. Amounts are in **centimes**. The customer saves their
+card once on a hosted Paywall (3-D Secure); renewals are then charged
+automatically and reported through `subscription.*` webhooks.
+
+#### End-to-end example
+
+```php
+use Aslan\Payment\Aslan;
+
+$aslan = new Aslan($_ENV['ASLAN_SECRET_KEY']);
+
+// 1. Create a plan (once)
+$plan = $aslan->plans->create([
+    'name'      => 'Pro',
+    'amount'    => 9900,        // 99.00 MAD per period
+    'currency'  => 'MAD',
+    'interval'  => 'monthly',   // daily | weekly | monthly | quarterly | yearly
+    'trialDays' => 0,
+]);
+
+// 2. Subscribe an existing customer (customerId = an Aslan customer UUID)
+$checkout = $aslan->subscriptions->create([
+    'planId'      => $plan->id,
+    'customerId'  => $customerId,
+    'returnUrl'   => 'https://example.com/billing/success',
+    'cancelUrl'   => 'https://example.com/billing/cancel',
+    'callbackUrl' => 'https://example.com/billing/callback',
+    'metadata'    => ['invoice_id' => 'INV-2026-0042'],
+]);
+
+$subscriptionId = $checkout->subscriptionId;   // status: pending_initial
+
+// 3. Send the customer to the Paywall. It expects a form POST of
+//    payload + signature to $checkout->redirectUrl, so render the
+//    auto-submitting form (a plain Location redirect will not work):
+echo $checkout->autoSubmitFormHtml();
+```
+
+```php
+// 4. Webhook endpoint
+$event = Aslan::webhooks($_ENV['ASLAN_WEBHOOK_SECRET'])->constructEvent(
+    $request->getContent(),                                  // raw body, unparsed
+    $request->headers->get('X-Webhook-Signature', ''),
+);
+
+switch ($event->type) {
+    case 'payment.succeeded':
+        // First payment of a no-trial plan: transaction id = $checkout->transactionId
+        break;
+
+    case 'subscription.renewed':
+        $sub = $event->asSubscription();                     // partial: id, planId, period dates, metadata
+        $txn = $event->data['transaction'];                  // ['id', 'amount', 'currency', 'providerRef']
+        $billing->markPaid($sub->metadata['invoice_id'] ?? null, $sub->id, $txn['amount']);
+        $billing->extendAccess($sub->id, until: $sub->currentPeriodEnd);
+        break;
+
+    case 'subscription.payment_failed':  // retried per dunning ladder (2, 5, 7 days)
+    case 'subscription.past_due':
+    case 'subscription.cancelled':
+    case 'subscription.plan_changed':
+    case 'subscription.plan_change_failed':
+        $billing->sync($aslan->subscriptions->retrieve($event->asSubscription()->id));
+        break;
+}
+```
+
+Trial plans (`trialDays > 0`) only charge a small, auto-refunded card-verification
+amount on the Paywall; the first real charge happens at `trialEndsAt` and is
+reported by `subscription.renewed`.
+
+#### Plans
+
+```php
+$plan = $aslan->plans->retrieve($planId);
+$page = $aslan->plans->list(['isActive' => true, 'page' => 1, 'pageSize' => 20]);
+$plan = $aslan->plans->update($planId, ['name' => 'Pro (2026)']);  // name, isActive, metadata only
+
+// Plans cannot be deleted — archive instead:
+$aslan->plans->update($planId, ['isActive' => false]);
+```
+
+#### Subscriptions
+
+```php
+$sub  = $aslan->subscriptions->retrieve($subscriptionId);   // includes plan, customer, card
+$sub->status;            // pending_initial | trialing | active | past_due | paused | cancelled
+$sub->card?->brand;      // "VISA" (last4 / expiry are often null)
+$sub->nextBillingAt;
+
+$page = $aslan->subscriptions->list(['status' => 'active', 'customerId' => $customerId]);
+
+// Upgrade / downgrade (card on file reused)
+$change = $aslan->subscriptions->changePlan($subscriptionId, $newPlanId, when: 'immediate_proration');
+$change->proratedAmount; // centimes charged now, or null
+
+// Cancel now, or at the end of the period (reversible)
+$aslan->subscriptions->cancel($subscriptionId);
+$aslan->subscriptions->cancel($subscriptionId, atPeriodEnd: true);
+$aslan->subscriptions->uncancel($subscriptionId);
+
+$aslan->subscriptions->pause($subscriptionId);
+$aslan->subscriptions->resume($subscriptionId);
+
+// Discount from the next renewal (null clears it)
+$aslan->subscriptions->update($subscriptionId, ['priceOverride' => 7900, 'priceOverrideMonths' => 3]);
+
+// New card / unfinished first payment: single-use payment link (plain redirect)
+$urls = ['returnUrl' => '…', 'cancelUrl' => '…', 'callbackUrl' => '…'];
+header('Location: ' . $aslan->subscriptions->changeCard($subscriptionId, $urls)->redirectUrl);
+header('Location: ' . $aslan->subscriptions->repay($subscriptionId, $urls)->redirectUrl);   // pending_initial only
+```
+
+#### Billing attempts, receipts and invoices
+
+```php
+$page = $aslan->billingAttempts->list(['subscriptionId' => $subscriptionId, 'status' => 'succeeded']);
+
+$receipt = $aslan->billingAttempts->receipt($attemptId);        // DocumentData (lines, totals)
+$pdf     = $aslan->billingAttempts->receiptPdf($attemptId);     // raw PDF bytes
+$invoice = $aslan->billingAttempts->facture($attemptId);        // facture mode only, idempotent
+
+$page    = $aslan->invoices->list(['kind' => 'facture', 'year' => 2026]);
+$invoice = $aslan->invoices->retrieve($invoiceId);
+$pdf     = $aslan->invoices->pdf($invoiceId);                   // raw PDF bytes
+
+return new Response($pdf, 200, ['Content-Type' => 'application/pdf']);
+```
+
+PDF downloads need an HTTP client implementing
+`Aslan\Payment\HttpClient\RawHttpClientInterface` (the bundled Symfony client does).
+
+---
+
 ### Webhooks Configuration
 
 ```php
@@ -346,7 +482,7 @@ use Aslan\Payment\AslanException;
 public function handle(Request $request): Response
 {
     $rawBody   = $request->getContent();
-    $sigHeader = $request->headers->get('Aslan-Signature', '');
+    $sigHeader = $request->headers->get('X-Webhook-Signature', '');
 
     try {
         $event = Aslan::webhooks($_ENV['ASLAN_WEBHOOK_SECRET'])
@@ -377,6 +513,12 @@ public function handle(Request $request): Response
 }
 ```
 
+Signature scheme: the `X-Webhook-Signature` header is `t=<unix_seconds>,v1=<hmac_hex>`,
+where `hmac_hex = HMAC-SHA256("<t>.<raw body>", webhook secret)`. The SDK compares in
+constant time and rejects timestamps more than 300 seconds from now (configurable via
+`constructEvent(..., tolerance: 600)`; `0` disables the check). Always pass the raw,
+unparsed request body. The event type is the body's `event` field (`$event->type`).
+
 **Testing your webhook handler** (generate a valid signature without hitting the API):
 
 ```php
@@ -399,7 +541,8 @@ use Aslan\Payment\AslanException;
 try {
     $session = $aslan->checkoutSessions->create(['amount' => -100]);
 } catch (AslanException $e) {
-    echo $e->code;       // VALIDATION_ERROR
+    echo $e->errorCode;  // VALIDATION_ERROR (also $e->getErrorCode())
+    echo $e->getCode();  // 422 — getCode() is the HTTP status (int)
     echo $e->getMessage(); // "amount must be a positive integer"
     echo $e->httpStatus; // 422
     echo $e->requestId;  // req_xxxxxxxx (for support tickets)
@@ -421,6 +564,7 @@ try {
 | `SERVER_ERROR` | 500 | Unexpected server error |
 | `NETWORK_ERROR` | 0 | Connection or timeout failure |
 | `WEBHOOK_SIGNATURE_ERROR` | 0 | Webhook signature verification failed |
+| `UNSUPPORTED_OPERATION` | 0 | Custom HTTP client cannot download raw (PDF) responses |
 
 The SDK automatically retries `408`, `429`, `500`, `502`, `503`, and `504` responses with exponential back-off (500ms → 1s → 2s, capped at 5s) before throwing.
 
@@ -530,15 +674,20 @@ vendor/bin/phpunit --coverage-html coverage/
 
 ---
 
+## Security: minimum PHP patch versions
+
+On 2026-10-21 PHP released fixes for the critical unauthenticated RCEs
+CVE-2026-109618 and CVE-2026-109619 ("php2shell") in **8.5.12, 8.4.27, 8.3.36 and
+8.2.35**. This package requires `~8.2.35 || ~8.3.36 || ~8.4.27 || >=8.5.12`, so
+Composer refuses to install it on a vulnerable PHP. Note that Composer's generated
+runtime platform check only enforces the lowest bound (8.2.35) — make sure the PHP
+that *runs* your application is patched too, not just the one that ran `composer install`.
+
+---
+
 ## Changelog
 
-### 0.1.0 (2024-01)
-
-- Initial release
-- CheckoutSessions, Transactions, PaymentLinks, Refunds, Vendors, Customers, ApiKeys, WebhooksConfig
-- Webhook signature verification with replay-attack protection
-- Symfony HttpClient adapter with exponential back-off retry
-- PHP 8.1 readonly DTOs
+See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 

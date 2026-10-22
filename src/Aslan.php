@@ -5,12 +5,17 @@ declare(strict_types=1);
 namespace Aslan\Payment;
 
 use Aslan\Payment\HttpClient\HttpClientInterface;
+use Aslan\Payment\HttpClient\RawHttpClientInterface;
 use Aslan\Payment\HttpClient\SymfonyHttpClient;
 use Aslan\Payment\Resources\ApiKeys;
+use Aslan\Payment\Resources\BillingAttempts;
 use Aslan\Payment\Resources\CheckoutSessions;
 use Aslan\Payment\Resources\Customers;
+use Aslan\Payment\Resources\Invoices;
 use Aslan\Payment\Resources\PaymentLinks;
+use Aslan\Payment\Resources\Plans;
 use Aslan\Payment\Resources\Refunds;
+use Aslan\Payment\Resources\Subscriptions;
 use Aslan\Payment\Resources\Transactions;
 use Aslan\Payment\Resources\Vendors;
 use Aslan\Payment\Resources\Webhooks;
@@ -50,6 +55,10 @@ final class Aslan
     public readonly Customers        $customers;
     public readonly ApiKeys          $apiKeys;
     public readonly WebhooksConfig   $webhooksConfig;
+    public readonly Plans            $plans;
+    public readonly Subscriptions    $subscriptions;
+    public readonly BillingAttempts  $billingAttempts;
+    public readonly Invoices         $invoices;
 
     // ------------------------------------------------------------------
     // Internal HTTP client
@@ -98,6 +107,10 @@ final class Aslan
         $this->customers        = new Customers($this);
         $this->apiKeys          = new ApiKeys($this);
         $this->webhooksConfig   = new WebhooksConfig($this);
+        $this->plans            = new Plans($this);
+        $this->subscriptions    = new Subscriptions($this);
+        $this->billingAttempts  = new BillingAttempts($this);
+        $this->invoices         = new Invoices($this);
     }
 
     // ------------------------------------------------------------------
@@ -112,7 +125,7 @@ final class Aslan
      *   $event = Aslan::webhooks($_ENV['ASLAN_WEBHOOK_SECRET'])
      *       ->constructEvent(
      *           file_get_contents('php://input'),
-     *           $_SERVER['HTTP_ASLAN_SIGNATURE'] ?? ''
+     *           $_SERVER['HTTP_X_WEBHOOK_SIGNATURE'] ?? ''
      *       );
      */
     public static function webhooks(string $webhookSecret): Webhooks
@@ -170,5 +183,34 @@ final class Aslan
         $url = rtrim($this->baseUrl, '/') . '/' . ltrim($path, '/');
 
         return $this->http->request($method, $url, $body, $headers, $query);
+    }
+
+    /**
+     * Perform an API request and return the raw response body (e.g. PDF bytes).
+     *
+     * @param  array<string, string> $headers  Extra request headers
+     * @param  array<string, mixed>  $query    Query-string parameters
+     *
+     * @throws AslanException When the HTTP client cannot return raw bodies
+     *
+     * @internal
+     */
+    public function requestRaw(
+        string $method,
+        string $path,
+        array $headers = [],
+        array $query = [],
+    ): string {
+        if (!$this->http instanceof RawHttpClientInterface) {
+            throw new AslanException(
+                'UNSUPPORTED_OPERATION',
+                'The configured HTTP client cannot download raw responses. Implement '
+                . RawHttpClientInterface::class . ' to fetch PDFs.'
+            );
+        }
+
+        $url = rtrim($this->baseUrl, '/') . '/' . ltrim($path, '/');
+
+        return $this->http->requestRaw($method, $url, $headers, $query);
     }
 }
