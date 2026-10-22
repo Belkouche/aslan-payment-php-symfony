@@ -8,7 +8,7 @@ namespace Aslan\Payment\Dto;
  * Represents a merchant API key.
  *
  * IMPORTANT: The full secret value is only returned once, at creation time.
- * Subsequent retrieve / list calls will only include the $prefix.
+ * Subsequent list calls only include the $prefix.
  */
 final readonly class ApiKey
 {
@@ -18,15 +18,12 @@ final readonly class ApiKey
         /** Human-readable label for this key */
         public string  $name,
 
-        /**
-         * Key environment.
-         * Possible values: live, test
-         */
+        /** @deprecated Use $type (same value). */
         public string  $environment,
 
         /**
-         * The lookup prefix (e.g. "abc123").
-         * The full key format is: sk_{environment}_{prefix}_{secret}
+         * The lookup prefix.
+         * The full key format is: sk_{type}_{prefix}_{secret}
          */
         public string  $prefix,
 
@@ -37,7 +34,7 @@ final readonly class ApiKey
         public ?string $secretKey,
 
         /**
-         * Key status.
+         * Derived from the API's `isActive` flag.
          * Possible values: active, revoked
          */
         public string  $status,
@@ -46,6 +43,15 @@ final readonly class ApiKey
         public ?string $lastUsedAt,
 
         public string  $createdAt,
+
+        /** Key mode: live | test (the API's `type`) */
+        public string  $type = 'live',
+
+        /** Publishable key (pk_...) issued with this key, if any */
+        public ?string $publishableKey = null,
+
+        /** ISO 8601 revocation time, or null */
+        public ?string $revokedAt = null,
     ) {}
 
     /**
@@ -53,15 +59,23 @@ final readonly class ApiKey
      */
     public static function fromArray(array $data): self
     {
+        $type   = (string) ($data['type'] ?? $data['environment'] ?? 'live');
+        $active = array_key_exists('isActive', $data)
+            ? (bool) $data['isActive']
+            : (($data['status'] ?? 'active') === 'active');
+
         return new self(
-            id:          (string) $data['id'],
-            name:        (string) ($data['name']        ?? ''),
-            environment: (string) ($data['environment'] ?? 'live'),
-            prefix:      (string) ($data['prefix']      ?? ''),
-            secretKey:   isset($data['secretKey']) ? (string) $data['secretKey'] : null,
-            status:      (string) ($data['status']      ?? 'active'),
-            lastUsedAt:  isset($data['lastUsedAt']) ? (string) $data['lastUsedAt'] : null,
-            createdAt:   (string) ($data['createdAt'] ?? $data['created_at'] ?? ''),
+            id:             (string) $data['id'],
+            name:           (string) ($data['name']   ?? ''),
+            environment:    $type,
+            prefix:         (string) ($data['prefix'] ?? ''),
+            secretKey:      isset($data['secretKey'])  ? (string) $data['secretKey']  : null,
+            status:         $active ? 'active' : 'revoked',
+            lastUsedAt:     isset($data['lastUsedAt']) ? (string) $data['lastUsedAt'] : null,
+            createdAt:      (string) ($data['createdAt'] ?? ''),
+            type:           $type,
+            publishableKey: isset($data['publishableKey']) ? (string) $data['publishableKey'] : null,
+            revokedAt:      isset($data['revokedAt']) ? (string) $data['revokedAt'] : null,
         );
     }
 
@@ -72,11 +86,11 @@ final readonly class ApiKey
 
     public function isLive(): bool
     {
-        return $this->environment === 'live';
+        return $this->type === 'live';
     }
 
     public function isTest(): bool
     {
-        return $this->environment === 'test';
+        return $this->type === 'test';
     }
 }

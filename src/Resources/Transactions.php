@@ -26,10 +26,11 @@ final class Transactions
      * Query params:
      *  - page (int, default 1)
      *  - pageSize (int, default 20, max 100)
-     *  - status (string) — filter by status
-     *  - reference (string) — filter by merchant reference
+     *  - status (string) — pending | processing | succeeded | failed | expired | refunded | partially_refunded
      *  - from (string) — ISO 8601 start date
      *  - to (string) — ISO 8601 end date
+     *  - sortBy (string) — createdAt | amount | status (default createdAt)
+     *  - sortOrder (string) — asc | desc (default desc)
      *
      * @param  array<string, mixed> $query
      * @return PaginatedResponse<Transaction>

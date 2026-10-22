@@ -25,14 +25,15 @@ final class Vendors
      *
      * Required params:
      *  - name (string)
-     *  - code (string) — unique vendor code / external reference
      *
      * Optional params:
+     *  - externalId (string) — your own identifier, unique per merchant
      *  - email (string)
-     *  - phone (string) — +212XXXXXXXXX
-     *  - ice (string)   — Moroccan ICE number
-     *  - iban (string)  — settlement IBAN or RIB
-     *  - metadata (array)
+     *  - commissionRate (float, 0 to 1)
+     *  - metadata (array<string, string>)
+     *
+     * The merchant must be configured as a marketplace. The API ignores the
+     * idempotency key on this route.
      *
      * @param  array<string, mixed> $params
      * @param  string|null          $idempotencyKey
@@ -54,9 +55,9 @@ final class Vendors
      *
      * Query params:
      *  - page (int, default 1)
-     *  - pageSize (int, default 20, max 100)
-     *  - status (string) — active | inactive | suspended
-     *  - search (string) — search by name or code
+     *  - limit (int, default 20, max 100) — not pageSize
+     *  - search (string) — name or externalId
+     *  - isActive (string) — "true" | "false"
      *
      * @param  array<string, mixed> $query
      * @return PaginatedResponse<Vendor>
@@ -84,8 +85,7 @@ final class Vendors
     /**
      * Update a vendor's details.
      *
-     * Updatable fields: name, email, phone, ice, iban, status, metadata
-     * (code cannot be changed after creation)
+     * Updatable fields: name, email, commissionRate, externalId, isActive, metadata
      *
      * @param  array<string, mixed> $params
      */
@@ -97,8 +97,7 @@ final class Vendors
     }
 
     /**
-     * Delete (deactivate) a vendor.
-     * Vendors with pending settlements cannot be deleted.
+     * Deactivate a vendor (the API sets isActive to false).
      */
     public function delete(string $id): bool
     {

@@ -5,28 +5,28 @@ declare(strict_types=1);
 namespace Aslan\Payment\Dto;
 
 /**
- * Represents a reusable payment link.
+ * Represents a payment link.
  *
- * Amounts are in centimes (100 = 1.00 MAD).
- * A payment link can be used multiple times until disabled or expired.
+ * Amounts are in centimes (100 = 1.00 MAD). A link is paid at most once: after a successful
+ * payment the API sets its status to `finalized` and refuses further payments.
  */
 final readonly class PaymentLink
 {
     public function __construct(
         public string  $id,
 
-        /** Human-readable title shown on the hosted page */
+        /** @deprecated The API has no title; holds `description` (or ''). */
         public string  $title,
 
-        /** Full short URL to share with customers */
+        /** Full URL to share with customers (https://<domain>/pl/<shortCode>) */
         public string  $url,
 
-        /** Slug used in the URL path */
+        /** @deprecated The API has no slug; holds `shortCode`. */
         public string  $slug,
 
         /**
          * Link status.
-         * Possible values: active, inactive, expired
+         * Possible values: active, inactive, expired, finalized (paid)
          */
         public string  $status,
 
@@ -35,21 +35,21 @@ final readonly class PaymentLink
 
         public string  $currency,
 
-        /** When true the customer can enter any amount */
+        /** True when `amount` is null (the payer chooses the amount) */
         public bool    $openAmount,
 
         public ?string $description,
 
-        /** Maximum number of times this link can be paid (null = unlimited) */
+        /** @deprecated Use $maxPayments. */
         public ?int    $maxUses,
 
-        /** Number of successful payments recorded on this link */
+        /** @deprecated Use $paymentCount. */
         public int     $usageCount,
 
-        /** URL Aslan redirects to on success */
+        /** @deprecated The API does not return it; always null. */
         public ?string $successUrl,
 
-        /** URL Aslan redirects to on failure or cancellation */
+        /** @deprecated The API does not return it; always null. */
         public ?string $cancelUrl,
 
         /** ISO 8601 expiry timestamp, or null if it never expires */
@@ -59,6 +59,26 @@ final readonly class PaymentLink
 
         public string  $createdAt,
         public string  $updatedAt,
+
+        /** Short code used in the URL path */
+        public string  $shortCode = '',
+
+        /** Maximum number of payment attempts the link accepts (null = unlimited) */
+        public ?int    $maxPayments = null,
+
+        /** Number of payment attempts started from this link (counted by the API) */
+        public int     $paymentCount = 0,
+
+        /** Minimum amount in centimes for open-amount links */
+        public ?int    $minAmount = null,
+
+        /** Maximum amount in centimes for open-amount links */
+        public ?int    $maxAmount = null,
+
+        /** payment (yours), or change_card / repay (links minted for a subscription) */
+        public string  $purpose = 'payment',
+
+        public ?string $vendorId = null,
     ) {}
 
     /**
@@ -66,24 +86,36 @@ final readonly class PaymentLink
      */
     public static function fromArray(array $data): self
     {
+        $shortCode    = (string) ($data['shortCode'] ?? $data['slug'] ?? '');
+        $maxPayments  = $data['maxPayments'] ?? $data['maxUses'] ?? null;
+        $paymentCount = (int) ($data['paymentCount'] ?? $data['usageCount'] ?? 0);
+        $description  = isset($data['description']) ? (string) $data['description'] : null;
+
         return new self(
-            id:          (string) $data['id'],
-            title:       (string) ($data['title']   ?? ''),
-            url:         (string) ($data['url']     ?? ''),
-            slug:        (string) ($data['slug']    ?? ''),
-            status:      (string) ($data['status']  ?? 'active'),
-            amount:      isset($data['amount'])     ? (int) $data['amount']      : null,
-            currency:    (string) ($data['currency'] ?? 'MAD'),
-            openAmount:  (bool)   ($data['openAmount'] ?? $data['open_amount'] ?? false),
-            description: isset($data['description']) ? (string) $data['description'] : null,
-            maxUses:     isset($data['maxUses'])      ? (int)    $data['maxUses']     : null,
-            usageCount:  (int)   ($data['usageCount'] ?? 0),
-            successUrl:  isset($data['successUrl'])   ? (string) $data['successUrl']  : null,
-            cancelUrl:   isset($data['cancelUrl'])     ? (string) $data['cancelUrl']   : null,
-            expiresAt:   isset($data['expiresAt'])     ? (string) $data['expiresAt']   : null,
-            metadata:    (array) ($data['metadata']    ?? []),
-            createdAt:   (string) ($data['createdAt']  ?? $data['created_at'] ?? ''),
-            updatedAt:   (string) ($data['updatedAt']  ?? $data['updated_at'] ?? ''),
+            id:           (string) $data['id'],
+            title:        (string) ($data['title'] ?? $description ?? ''),
+            url:          (string) ($data['url']     ?? ''),
+            slug:         $shortCode,
+            status:       (string) ($data['status']  ?? 'active'),
+            amount:       isset($data['amount'])     ? (int) $data['amount'] : null,
+            currency:     (string) ($data['currency'] ?? 'MAD'),
+            openAmount:   (bool)   ($data['openAmount'] ?? !isset($data['amount'])),
+            description:  $description,
+            maxUses:      $maxPayments !== null ? (int) $maxPayments : null,
+            usageCount:   $paymentCount,
+            successUrl:   isset($data['successUrl']) ? (string) $data['successUrl'] : null,
+            cancelUrl:    isset($data['cancelUrl'])  ? (string) $data['cancelUrl']  : null,
+            expiresAt:    isset($data['expiresAt'])  ? (string) $data['expiresAt']  : null,
+            metadata:     (array) ($data['metadata']   ?? []),
+            createdAt:    (string) ($data['createdAt'] ?? ''),
+            updatedAt:    (string) ($data['updatedAt'] ?? ''),
+            shortCode:    $shortCode,
+            maxPayments:  $maxPayments !== null ? (int) $maxPayments : null,
+            paymentCount: $paymentCount,
+            minAmount:    isset($data['minAmount']) ? (int) $data['minAmount'] : null,
+            maxAmount:    isset($data['maxAmount']) ? (int) $data['maxAmount'] : null,
+            purpose:      (string) ($data['purpose'] ?? 'payment'),
+            vendorId:     isset($data['vendorId']) ? (string) $data['vendorId'] : null,
         );
     }
 
@@ -92,8 +124,15 @@ final readonly class PaymentLink
         return $this->status === 'active';
     }
 
+    /** The link has been paid (status `finalized`). */
+    public function isFinalized(): bool
+    {
+        return $this->status === 'finalized';
+    }
+
+    /** True when `paymentCount` has reached `maxPayments`. */
     public function hasReachedMaxUses(): bool
     {
-        return $this->maxUses !== null && $this->usageCount >= $this->maxUses;
+        return $this->maxPayments !== null && $this->paymentCount >= $this->maxPayments;
     }
 }

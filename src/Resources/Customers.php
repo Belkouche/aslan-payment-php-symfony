@@ -47,7 +47,7 @@ final class Customers
      * Query params:
      *  - page (int, default 1)
      *  - pageSize (int, default 20, max 100)
-     *  - search (string, max 255) — search by email, phone, or name
+     *  - search (string, max 255) — matched against the stored email and name columns
      *  - sortBy (string) — createdAt | email | name (default createdAt)
      *  - sortOrder (string) — asc | desc (default desc)
      *

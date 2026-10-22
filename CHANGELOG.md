@@ -15,6 +15,15 @@
 - `AslanException::$errorCode` / `getErrorCode()`.
 
 ### Fixed
+- DTOs now map the API's real response shapes (0.1.0 names are kept as deprecated aliases where cheap):
+  - `CheckoutSession`: `isPending()` is true for `open` / `awaiting_cash` / `processing`, `isCompleted()` for `complete`; `transactionId` (and new `transactionStatus`) are read from the API's nested `transaction` on `retrieve()`; `openAmount` is derived from a null `amount` when absent.
+  - `Transaction`: `isSuccessful()` tests `succeeded`; `isRefundable()` tests `succeeded` / `partially_refunded`; `refundedAmount` is computed from the returned refunds (excluding `failed` / `rejected`, the API's own rule). New `providerRef`, `paidAt`, `failedAt`, `errorMessage`, `refunds`. A null or missing API amount reads as 0.
+  - `PaymentLink`: new `shortCode`, `maxPayments`, `paymentCount`, `minAmount`, `maxAmount`, `purpose`, `vendorId`; `hasReachedMaxUses()` uses them; new `isFinalized()`. `title` / `slug` / `maxUses` / `usageCount` are deprecated aliases.
+  - `Vendor`: `status` / `isActive()` come from the API's `isActive`; new `externalId`, `commissionRate`. `code` is a deprecated alias of `externalId`.
+  - `ApiKey`: new `type` (read from the API's `type`), `publishableKey`, `revokedAt`; `isLive()` / `isTest()` use `type`; `status` comes from `isActive`. `environment` is a deprecated alias.
+  - `Customer`: `totalSpend` / `transactionCount` (and new `successfulTransactionCount`) are read from `retrieve()`'s `transactions` summary; the internal `encryptedEmail` key the API leaks in customer list metadata is removed from `$metadata`.
+- `PaginatedResponse` reads the vendors list envelope (top-level `total` / `page` / `limit` / `totalPages`).
+- Resource docblocks list the parameters the API really accepts.
 - **`AslanException` caused a fatal error on load** on every PHP 8.x (`public readonly string $code` redeclared `Exception::$code`), so every SDK error path crashed instead of throwing. The API error code is now `$errorCode` / `getErrorCode()`; `getCode()` returns the HTTP status (int, `0` when none). **Breaking:** replace `$e->code` with `$e->errorCode`.
 - Webhook header name is `X-Webhook-Signature` (was documented as `Aslan-Signature`). The `t=<unix>,v1=<hmac_hex>` scheme over `"<t>.<rawBody>"` is unchanged.
 - `WebhookEvent` reads the event type from the payload's `event` field and parses the ISO 8601 `createdAt` (previously cast to an int, yielding the year); `asTransaction()` also reads `data.transaction`.
@@ -25,7 +34,7 @@
 - `WebhookEvent::asRefund()` reads `data.refund`, where the API puts refund payloads.
 
 ### Documentation
-- README and AGENTS.md fact-checked against the API: idempotency support per route, HTTPS-only URLs, subscription lifecycle (dunning schedule, `past_due`, which actions send which webhooks), `subscription.plan_change_failed` meaning, cash events, webhook delivery retries/timeout, request parameters of 0.1.0-era resources, and a "Known gaps in 0.2.0" list of DTO fields that do not match the API yet.
+- README and AGENTS.md fact-checked against the current API: idempotency support per route, HTTPS-only URLs, subscription lifecycle (trials: refunded verification charge at signup and first charge at trial end, dunning schedule incl. trial-end failures, billing anchor day and catch-up re-anchoring, price-override window, plan changes during a trial, which actions send which webhooks), `subscription.renewed` metadata, `payment.succeeded` for verification charges, payment links paid once, `subscription.plan_change_failed` meaning, cash events, webhook delivery retries/timeout, request parameters of 0.1.0-era resources.
 
 ### Security / requirements
 - PHP constraint is now `~8.2.35 || ~8.3.36 || ~8.4.27 || >=8.5.12`: Composer refuses to install on PHP builds vulnerable to CVE-2026-109618 / CVE-2026-109619 ("php2shell", fixed 2026-10-21).

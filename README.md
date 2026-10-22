@@ -38,7 +38,7 @@ Typical flows:
 | You want to... | You use... |
 |---|---|
 | Charge a customer once, for an order | a **checkout session** (section 5) |
-| Share a reusable "pay me" URL (invoice, donation, QR code) | a **payment link** |
+| Share a "pay me" URL or QR code (invoice, donation), paid once | a **payment link** |
 | Charge a customer every month/year | a **plan** + a **subscription** (section 6) |
 | Give money back | a **refund** |
 | Know that a payment really happened | a **webhook** (section 7) |
@@ -192,7 +192,7 @@ Never send floats (`149.0`, `"149.00"`). Convert once at the edge: `(int) round(
 ### Checkout session vs payment link vs subscription
 
 - **Checkout session**: a single-use, time-limited payment for one order (it expires 30 minutes after creation; 48 hours when cash is offered). You create it, redirect the customer to `$session->url`, done.
-- **Payment link**: a reusable, shareable URL (optionally with a QR code, a payment-count limit, an expiry). Good for invoices and donations.
+- **Payment link**: a shareable URL (with a QR code, optional expiry and attempt limit) that you can send by any channel. It is **paid once**: after a successful payment the API sets it to `finalized` and refuses further payments, so create one link per invoice. Good for invoices and donations.
 - **Subscription**: a customer pays a **plan** automatically every interval until cancelled. Needs a customer who saves a card once.
 
 ### Webhooks are the source of truth
@@ -203,7 +203,7 @@ When the customer comes back to your `successUrl`, that only proves their *brows
 
 Creating things over a network can fail halfway (timeout: did it work or not?). To retry safely, pass an **idempotency key** (sent as the `Idempotency-Key` header): the same key returns the cached result (kept 24 hours) instead of creating a duplicate.
 
-The API honours the key on exactly three of the SDK's create calls: `checkoutSessions->create`, `paymentLinks->create` and `refunds->create`.
+The API honours the key on exactly three of the SDK's create calls: `checkoutSessions->create`, `paymentLinks->create` and `refunds->create`. A replayed response carries the header `Idempotency-Replayed: true`; a second request with the same key while the first is still running is rejected with `409 CONFLICT`.
 
 ```php
 $session = $aslan->checkoutSessions->create($params, idempotencyKey: 'order_' . $orderId);
@@ -242,9 +242,9 @@ header('Location: ' . $session->url);   // send the customer to the hosted payme
 exit;
 ```
 
-**What happens:** the API creates a checkout session (status `open`, expires 30 minutes after creation; there is no parameter to change that) and returns its hosted `url`. The customer pays on Aslan's page. Card data never touches your server. Fields the API does not know (for example `reference`, `description`, `expiresIn`) are silently dropped, so put your own identifiers in `metadata` (max 20 keys, keys up to 40 chars, values up to 500 chars).
+**What happens:** the API creates a checkout session (status `open`, expires 30 minutes after creation; there is no parameter to change that) and returns its hosted `url`. The customer pays on Aslan's page. Card data never touches your server. Fields the API does not know (for example `reference`, `description`, `expiresIn`) are silently dropped, so put your own identifiers in `metadata` (max 20 keys, keys up to 40 chars, values up to 500 chars; keys starting with `__` are reserved and dropped).
 
-`CheckoutSession` properties: `id`, `token`, `url`, `amount` (`?int`), `currency`, `status`, `openAmount`, `transactionId`, `reference`, `description`, `successUrl`, `cancelUrl`, `metadata`, `expiresAt`, `createdAt`, `updatedAt`. The API's status values are `open`, `awaiting_cash`, `processing`, `complete` and `expired`. Compare `$session->status` against those directly: the helpers `isPending()` / `isCompleted()` test for `pending` / `completed`, which the API does not return (see [Known gaps](#known-gaps-in-020)); `isExpired()` works.
+`CheckoutSession` properties: `id`, `token`, `url`, `amount` (`?int`), `currency`, `status`, `openAmount`, `transactionId`, `transactionStatus`, `successUrl`, `cancelUrl`, `metadata`, `expiresAt`, `createdAt` (plus deprecated `reference`, `description`, `updatedAt`, which the API never fills). `create()` returns only the core fields; `retrieve()` adds `successUrl`, `cancelUrl`, `metadata` and the linked transaction (`transactionId`, `transactionStatus`). Status values: `open`, `awaiting_cash`, `processing`, `complete`, `expired`. Helpers: `isPending()` (`open`, `awaiting_cash` or `processing`), `isCompleted()` (`complete`), `isExpired()`.
 
 ### Step 2: wait for the webhook
 
@@ -259,6 +259,8 @@ echo $transaction->status;   // pending | pending_cash | cash_late_confirmation 
 ```
 
 ### Payment link example
+
+A link is paid once: after a successful payment its status becomes `finalized`.
 
 ```php
 $link = $aslan->paymentLinks->create([
@@ -302,7 +304,7 @@ $refund = $aslan->refunds->create([
   |<-- SubscriptionCheckout -----|                              |
   |  4. autoSubmitFormHtml() ----------------------------------> browser POSTs to Paywall
   |                              |<---- card + 3-D Secure ------|
-  |<== webhook payment.succeeded |  (subscription becomes active / trialing)
+  |<== webhook payment.succeeded |  (active; or trialing after a refunded card check)
   |                              |                              |
   |<== webhook subscription.renewed   every period, automatically
   |<== webhook subscription.payment_failed (+ past_due / cancelled)   when renewals fail (dunning)
@@ -315,9 +317,10 @@ stateDiagram-v2
     [*] --> pending_initial: subscriptions.create()
     pending_initial --> pending_initial: repay() (fresh Paywall link)
     pending_initial --> active: first payment succeeded (plan without trial)
-    pending_initial --> trialing: first payment succeeded (plan with trialDays)
+    pending_initial --> trialing: card saved, verification refunded (plan with trialDays)
     pending_initial --> cancelled: unpaid after ~24 h (abandoned)
-    trialing --> active: trial end (set by the API)
+    trialing --> active: trial-end charge succeeded (subscription.renewed)
+    trialing --> past_due: trial-end charge failed (retry in 2 days)
     active --> active: renewal succeeded (subscription.renewed)
     active --> active: 1st / 2nd renewal failure, retry in 2 / 5 days
     active --> past_due: 3rd consecutive failure (retry in 7 days)
@@ -335,13 +338,13 @@ stateDiagram-v2
 | Status | Meaning | What you should do |
 |---|---|---|
 | `pending_initial` | Created, first payment not completed yet. If still unpaid after about 24 hours it is cancelled as abandoned (`subscription.cancelled`) | Do **not** grant access. If the customer abandoned the Paywall, call `repay()` |
-| `trialing` | First payment succeeded on a plan with `trialDays > 0`; the trial runs until `trialEndsAt` | Grant access. When billing starts after the trial is set by the API |
+| `trialing` | Card saved on a plan with `trialDays > 0` (only a refunded verification amount was charged); the trial runs until `trialEndsAt`, where the first real charge is made | Grant access |
 | `active` | Paid up, renews automatically. Also stays `active` after a 1st or 2nd failed renewal while retries are pending | Grant access |
-| `past_due` | Three renewal charges in a row failed; one last retry is scheduled 7 days later | Warn the customer; offer `changeCard()`. Decide your own grace policy |
+| `past_due` | Three renewal charges in a row failed (one last retry 7 days later), or the trial-end charge failed (retries after 2, 5 and 7 days) | Warn the customer; offer `changeCard()`. Decide your own grace policy |
 | `paused` | Paused via `pause()` (only an `active` subscription can be paused); not billed while paused | Suspend access per your policy |
 | `cancelled` | Ended (merchant cancel, period end, dunning or abandoned) | Revoke access |
 
-The statuses are exposed as `Subscription::$status` (a nullable string). Helpers: `isActive()`, `isPastDue()`, `isCancelled()`.
+The statuses are exposed as `Subscription::$status` (a nullable string). Helpers: `isActive()` (`active` or `trialing`), `isPastDue()`, `isCancelled()`.
 
 ### Step 1: create a plan (once)
 
@@ -381,7 +384,7 @@ try {
     ]);
 } catch (AslanException $e) {
     if ($e->getCode() === 409) {            // errorCode CONFLICT: this email already exists
-        // look the existing customer up instead, e.g. with $aslan->customers->list(['search' => ...])
+        // use the customer id you stored the first time (see below)
     }
     throw $e;
 }
@@ -389,7 +392,7 @@ try {
 $customerId = $customer->id;               // store it against your user
 ```
 
-Store the returned `id` against your own user record and reuse it; creating the same email twice is rejected with `409`.
+Store the returned `id` against your own user record and reuse it; creating the same email twice is rejected with `409`. The API offers no reliable lookup by email: emails and names are stored encrypted, so `customers->list(['search' => ...])` does not find them. Your stored `id` is the reference.
 
 ### Step 3: create the subscription
 
@@ -411,7 +414,7 @@ saveSubscriptionIdForCustomer($customerId, $checkout->subscriptionId);
 
 `create()` returns a `SubscriptionCheckout` with: `subscriptionId`, `transactionId` (the initial charge; reported later by `payment.succeeded`), `redirectUrl` (the Paywall URL), and `paywall` (an array `['payload' => ..., 'signature' => ...]`).
 
-Optional params: `priceOverride` (int centimes, between 1 and the plan amount), `priceOverrideMonths` (int, >= 1, requires `priceOverride`; counted in calendar months from creation, omit for a permanent override), `metadata` (string map, also copied onto the initial transaction so it appears in `payment.succeeded`). All three URLs (`returnUrl`, `cancelUrl`, `callbackUrl`) are required and must start with `https://`. The API ignores `callbackUrl`: payment-provider notifications always go to Aslan, and you hear about the result through your webhook.
+Optional params: `priceOverride` (int centimes, between 1 and the plan amount), `priceOverrideMonths` (int, >= 1, requires `priceOverride`; counted in calendar months from creation, also for a plan with a trial; omit for a permanent override), `metadata` (string map; keys starting with `__` are reserved and dropped). For a plan **without** a trial the metadata is also copied onto the initial transaction, so it appears in `payment.succeeded`; for a plan **with** a trial it is not (see step 4). All three URLs (`returnUrl`, `cancelUrl`, `callbackUrl`) are required and must start with `https://`. The API ignores `callbackUrl`: payment-provider notifications always go to Aslan, and you hear about the result through your webhook.
 
 ### Step 4: send the customer to the Paywall (form POST, not a redirect)
 
@@ -425,11 +428,18 @@ exit;
 
 **What happens:** the customer lands on the Paywall, saves a card, completes 3-D Secure, pays, and is sent back to your `returnUrl`. The Paywall link expires about 30 minutes after it is issued; use `repay()` to get a fresh one.
 
-The Paywall charges the plan amount (or `priceOverride`) **whether or not the plan has a trial**. On success the subscription becomes `active` (no trial) or `trialing` until `trialEndsAt` (plan with `trialDays`).
+What the Paywall charges depends on the plan:
+
+- **No trial** (`trialDays` = 0): the first period's price (the plan amount, or `priceOverride`). On success the subscription becomes `active` and its first period starts now.
+- **With a trial** (`trialDays` > 0): only a small **card-verification amount** (100 centimes = 1.00 MAD by default, configurable on the API side), used to save the card with 3-D Secure. It is refunded automatically once the payment is confirmed. On success the subscription becomes `trialing` until `trialEndsAt` (now + `trialDays`). The **first real charge** (the plan amount, or the override if it still applies) is made automatically at `trialEndsAt` and reported with `subscription.renewed`; if it fails, the subscription goes straight to `past_due` and the normal retry schedule applies (step 7).
+
+Subscriptions with a trial created before this verification charge existed paid the full price at signup; at trial end they become `active` **without** a second charge (and without a webhook); their next renewal is charged as usual.
 
 ### Step 5: wait for the webhook, then activate
 
-The subscription stays `pending_initial` until the first payment succeeds. Do not grant access when the customer returns to `returnUrl`; wait for the verified `payment.succeeded` webhook (its `data.transaction.id` matches `$checkout->transactionId`; after a `repay()` it is a new transaction id, so also match on the `metadata` you passed, which is copied to the transaction), then re-read the state if you need it:
+The subscription stays `pending_initial` until the first payment succeeds. Do not grant access when the customer returns to `returnUrl`; wait for the verified `payment.succeeded` webhook (its `data.transaction.id` matches `$checkout->transactionId`; after a `repay()` it is a new transaction id, so also match on the `metadata` you passed, which is copied to the transaction for plans without a trial), then re-read the state if you need it.
+
+For a plan with a trial, that `payment.succeeded` is the verification charge: `data.transaction.amount` is the verification amount, and `data.transaction.metadata` holds only internal markers (`__subscriptionId`, `__payzoneRecurrenceType`, `__trialVerification: true`), not your metadata. It is followed by `refund.*` events for the automatic refund. Do not book it as revenue.
 
 ```php
 $sub = $aslan->subscriptions->retrieve($subscriptionId);   // Subscription
@@ -438,13 +448,19 @@ if ($sub->isActive() || $sub->status === 'trialing') {
 }
 ```
 
-`Subscription` properties: `id`, `customerId`, `customer` (`?SubscriptionCustomer`: `id`, `email`, `name`, `phone`), `planId`, `plan` (`?Plan`), `providerId`, `status`, `failureCount`, `currentPeriodStart`, `currentPeriodEnd`, `nextBillingAt`, `trialEndsAt`, `cancelAtPeriodEnd`, `cancelledAt`, `priceOverride`, `priceOverrideUntil`, `metadata`, `card` (`?SubscriptionCard`: `brand`, `last4`, `expiryMonth`, `expiryYear`), `createdAt`, `updatedAt`.
+`Subscription` properties: `id`, `customerId`, `customer` (`?SubscriptionCustomer`: `id`, `email`, `name`, `phone`), `planId`, `plan` (`?Plan`), `providerId`, `status`, `failureCount`, `currentPeriodStart`, `currentPeriodEnd`, `nextBillingAt`, `trialEndsAt`, `cancelAtPeriodEnd`, `cancelledAt`, `priceOverride`, `priceOverrideUntil`, `metadata`, `card` (`?SubscriptionCard`: `brand`, `last4`, `expiryMonth`, `expiryYear`), `createdAt`, `updatedAt`. `customer` and `card` are only filled by `retrieve()`; `list()` items include `plan` but not those two. `isActive()` is true for `active` **and** `trialing`.
 
 If the customer abandoned the Paywall and the subscription is still `pending_initial`, mint a fresh link (see "Change card / repay" below).
 
 ### Step 6: renewals are automatic
 
-Once `nextBillingAt` has passed, Aslan charges the saved card for the next period (the API checks for due subscriptions every 5 minutes; the new period starts where the previous one ended). You do nothing. On success you receive `subscription.renewed`, whose `$event->data` holds `subscription` (`id`, `planId`, `currentPeriodStart`, `currentPeriodEnd`, `nextBillingAt`) and `transaction` (`id`, `amount`, `currency`, `providerRef`); use it to extend access and to create your own invoice. Renewals do **not** send `payment.succeeded`. Use `currentPeriodEnd` / `nextBillingAt` for "next payment on ..." messages.
+Once `nextBillingAt` has passed, Aslan charges the saved card for the next period (the API checks for due subscriptions every 5 minutes; the new period starts where the previous one ended). You do nothing. The amount is the plan amount, or `priceOverride` while it applies (see "Price override").
+
+On success you receive `subscription.renewed`, whose `$event->data` holds `subscription` (`id`, `planId`, `currentPeriodStart`, `currentPeriodEnd`, `nextBillingAt`, `metadata`: the subscription's own metadata without internal `__` keys) and `transaction` (`id`, `amount` in centimes, `currency`, `providerRef`); use it to extend access and to create your own invoice. The same event reports the first real charge at the end of a trial. The renewal flow sends `subscription.renewed`, not `payment.succeeded`; if you also handle `payment.succeeded`, key it on the transaction id so a subscription charge is never mistaken for a one-off order. Use `currentPeriodEnd` / `nextBillingAt` for "next payment on ..." messages.
+
+**Billing day.** Monthly, quarterly and yearly plans renew on a fixed day of the month, the *billing anchor*: the UTC day-of-month on which the paid periods started (activation, trial end, `resume()` or an immediate plan change sets a new anchor). In shorter months the date is clamped to the month's last day and then returns to the anchor, so a subscription anchored on the 31st renews Jan 31, Feb 28 (29), Mar 31, Apr 30. Daily and weekly plans have no anchor. All dates are computed in UTC.
+
+**Catch-up.** If a renewal is charged so late that the period it would pay for is already over (for example a dunning retry that succeeds long after the due date), the period is re-anchored on the moment of the charge: one charge, and the next renewal is one interval later. Missed periods are never billed back-to-back.
 
 ### Step 7: dunning (failed renewals)
 
@@ -456,6 +472,8 @@ When a renewal charge fails Aslan retries it on a fixed schedule ("dunning"). Ev
 | 2nd | unchanged | 5 days later | none |
 | 3rd | `past_due` | 7 days later | `subscription.past_due` |
 | 4th | `cancelled` (reason `dunning`) | none | `subscription.cancelled` |
+
+Exception: when the **trial-end** charge fails, the subscription goes to `past_due` at the 1st failure (with `subscription.past_due`, sent only once) and follows the same 2 / 5 / 7-day retries, then cancellation at the 4th failure.
 
 A retry that succeeds sends `subscription.renewed`, sets the status back to `active` and resets `failureCount` to 0. Tell the customer to update their card (`changeCard()`) as soon as the first `subscription.payment_failed` arrives: the new card is used by the next scheduled retry (changing the card does not trigger an immediate charge). If the payment provider answers without a definitive outcome, the attempt stays `pending`, no webhook is sent and the next try is pushed back 24 hours.
 
@@ -475,8 +493,9 @@ header('Location: ' . $link->redirectUrl);
 ```
 
 - `changeCard()` re-collects the card with 3-D Secure. A small verification amount (1.00 MAD by default) is charged and then refunded automatically. It only swaps the card on file: status and `failureCount` are unchanged, and the next scheduled renewal or dunning retry uses the new card. Rejected (400) on a `cancelled` subscription.
-- `repay()` is for a subscription still in `pending_initial` whose first payment was never completed (API returns 400 for any other status).
-- Both links are single-use and valid for 7 days. All three URLs must be `https://`; `callbackUrl` is required but ignored by the API.
+- `repay()` is for a subscription still in `pending_initial` whose first payment was never completed (API returns 400 for any other status). It charges what `create()` would: the first period's price, or the refunded verification amount for a plan with a trial. If the subscription is no longer `pending_initial` when the customer opens the link, the link is refused.
+- Both links are single-use and valid for 7 days by default (set by the API). All three URLs must be `https://`; `callbackUrl` is required but ignored by the API. They show up in `paymentLinks->list()` with `purpose` `change_card` / `repay`.
+- The verification charge of `changeCard()` also produces a `payment.succeeded` webhook (with `data.transaction.metadata.__changeCard` = `true`) and `refund.*` webhooks for its refund. It is not a sale.
 
 ### Change plan
 
@@ -495,13 +514,15 @@ Only an `active` or `trialing` subscription can change plan (400 otherwise). The
 
 | `when` | What happens |
 |---|---|
-| `immediate` | The new plan applies now; a new period starts now (next renewal one new-plan interval from now), any price override and any scheduled period-end cancellation are cleared. Nothing is charged now. |
-| `immediate_proration` | The new plan applies now and the renewal date is kept. For an upgrade, the price difference times the unused fraction of the period, rounded **up** to a whole dirham, is charged immediately (`proratedTransactionId`, `proratedAmount`). A downgrade charges nothing and credits nothing. |
-| `period_end` | Nothing changes now; the new plan is applied by the next renewal, which charges the new plan's full amount. |
+| `immediate` | The new plan applies now; a new period starts now (next renewal one new-plan interval from now, new billing anchor), any price override and any scheduled period-end cancellation are cleared. Nothing is charged now. |
+| `immediate_proration` | The new plan applies now and the renewal date is kept; any price override is cleared. For an upgrade, the difference between the new plan amount and what the current period is billed (plan amount or override), times the unused fraction of the period, rounded **up** to a whole dirham, is charged immediately (`proratedTransactionId`, `proratedAmount`). A downgrade charges nothing and credits nothing. |
+| `period_end` | Nothing changes now; the new plan is applied by the next renewal, which charges the new plan's full amount (any price override is dropped then). |
+
+During a **trial** nothing has been charged yet, so `immediate` and `immediate_proration` just switch the plan: no proration charge, the trial end stays the same (the first charge at trial end uses the new plan), and a scheduled period-end cancellation is kept.
 
 `subscription.plan_changed` is sent as soon as the API accepts the change, for all three modes. Its `data.subscription` holds `id`, `planId`, `previousPlanId`, `effectiveAt` and, for a proration, `proratedTransactionId`. `effectiveAt` is the time of the change for `immediate` / `immediate_proration`, and the current `currentPeriodEnd` for `period_end` (null only if the subscription has no current period).
 
-If the proration charge fails, the plan is **not** changed, no webhook is sent, and `changePlan()` throws `AslanException` (HTTP 400, `VALIDATION_ERROR`, message "Proration charge failed; plan not changed").
+If the proration charge fails, the plan is **not** changed, no webhook is sent, and `changePlan()` throws `AslanException` (HTTP 400, `VALIDATION_ERROR`, message "Proration charge failed; plan not changed"). The proration is recorded as a billing attempt of type `proration`.
 
 `subscription.plan_change_failed` is only about `period_end` changes: it is sent at renewal time when the scheduled target plan has been archived (or no longer exists). Its `data.subscription` holds `id` and `pendingPlanId`; the pending change is dropped and the subscription renews on its current plan.
 
@@ -512,7 +533,7 @@ $aslan->subscriptions->update($subscriptionId, ['priceOverride' => 7900, 'priceO
 $aslan->subscriptions->update($subscriptionId, ['priceOverride' => null]);                                // clear it
 ```
 
-It takes effect at the **next renewal** (nothing is charged now), must not exceed the plan amount, and is blocked (400) on cancelled subscriptions. A plan change clears it.
+It takes effect at the **next renewal** (nothing is charged now), must not exceed the plan amount, and is blocked (400) on cancelled subscriptions. A plan change clears it. `priceOverrideMonths` counts calendar months from the moment of the call (it requires a non-null `priceOverride`); without it the override is permanent. The rule: the override applies to every period that **starts on or before** `priceOverrideUntil`; the first renewal whose period starts later is charged the plan amount, and the override is then cleared. The charged amount never exceeds the current plan amount.
 
 ### Cancel, uncancel, pause, resume
 
@@ -527,9 +548,9 @@ $aslan->subscriptions->resume($id);
 All of them return a `SubscriptionStatusChange` (`subscriptionId`, `status`, `cancelAtPeriodEnd`):
 
 - `cancel($id)` cancels immediately (response status `cancelled`). **No webhook is sent**: update your own records right away.
-- `cancel($id, atPeriodEnd: true)` leaves the status unchanged (`active`, `trialing`, `past_due` or `paused`) with `cancelAtPeriodEnd === true`. Once `currentPeriodEnd` has passed the subscription is cancelled and `subscription.cancelled` is sent with `cancelReason: "period_end"`.
+- `cancel($id, atPeriodEnd: true)` leaves the status unchanged (`active`, `trialing`, `past_due` or `paused`) with `cancelAtPeriodEnd === true`. Once `currentPeriodEnd` has passed the subscription is cancelled instead of renewed and `subscription.cancelled` is sent with `cancelReason: "period_end"`. For a trial, `currentPeriodEnd` is the trial end, so it ends there without any charge.
 - `uncancel($id)` clears a scheduled period-end cancellation.
-- `pause($id)` only affects an `active` subscription; `resume($id)` only a `paused` one, and starts a fresh billing period from now. The response echoes `paused` / `resumed` even when nothing changed (`resumed` is not a real subscription status).
+- `pause($id)` only affects an `active` subscription; a paused subscription is not billed. `resume($id)` only affects a `paused` one: it starts a fresh billing period from now (new billing anchor) without charging; the next charge is at the end of that period. The response echoes `paused` / `resumed` even when nothing changed (`resumed` is not a real subscription status).
 
 `subscription.cancelled` is sent only for cancellations the API makes on its own: `cancelReason` `period_end`, `dunning` (4th failed renewal) or `abandoned` (`pending_initial` unpaid after about 24 hours). Immediate `cancel()`, `pause()`, `resume()` and `uncancel()` send no webhook. Re-read with `retrieve()` if you need the full state.
 
@@ -545,6 +566,8 @@ foreach ($attempts->data as $attempt) {            // BillingAttempt
 $invoice = $aslan->billingAttempts->facture($attempt->id);         // Invoice (facture mode only, idempotent)
 $pdf     = $aslan->invoices->pdf($invoice->id);                    // raw PDF string
 ```
+
+Receipts and invoices exist only for `succeeded` attempts, and never for the refunded verification charge of a trial signup (the API answers 400 for those).
 
 ---
 
@@ -653,21 +676,21 @@ function handle(\Aslan\Payment\Dto\WebhookEvent $event, \PDO $db): void
 
 | Event | Sent when | What to do |
 |---|---|---|
-| `payment.succeeded` | A payment succeeded: checkout session, payment link, a confirmed cash payment, or a subscription's **first** payment (renewals send `subscription.renewed` instead) | Mark the order paid, activate what was bought |
+| `payment.succeeded` | A payment succeeded: checkout session, payment link, a confirmed cash payment, or a subscription's **first** payment (renewals send `subscription.renewed` instead). Also sent for the refunded card-verification charges of a trial signup (`data.transaction.metadata.__trialVerification` = `true`) and of `changeCard()` (`__changeCard` = `true`): those are not sales | Mark the order paid, activate what was bought |
 | `payment.failed` | A payment attempt failed | Tell the customer, let them retry |
 | `payment.expired` | A pending payment expired unpaid (for cash: the payment code expired, `data.transaction.reason` = `cash_code_expired`) | Release reserved stock, cancel the pending order |
 | `payment.pending_cash` | The customer chose to pay **cash** at checkout and received a payment code: `data.transaction` holds `id`, `referenceCode`, `networkName` (where to pay) and `expiresAt` (48 h by default) | Keep the order "awaiting payment"; do not ship yet |
 | `payment.cash_late_confirmation` | The cash network confirmed a payment **after** the code's expiry plus the grace period (2 h by default). The transaction is set to status `cash_late_confirmation`, not `succeeded`, and no `payment.succeeded` is sent | The customer did pay: reconcile manually (fulfil the order or refund) |
 | `refund.created` | A refund was created | Record it in your books |
 | `refund.updated` | A refund changed status (`pending`, `approved`, `processing`, `succeeded`, `failed`, `rejected`) | Update your records; use `asRefund()` |
-| `subscription.renewed` | A renewal charge succeeded (including a successful dunning retry) | Extend access, issue your invoice |
+| `subscription.renewed` | A renewal charge succeeded (including a successful dunning retry and the first charge at the end of a trial); carries the subscription's `metadata` | Extend access, issue your invoice |
 | `subscription.payment_failed` | A renewal charge failed (sent for every failure, see the dunning table) | Ask the customer to update their card |
-| `subscription.past_due` | The 3rd consecutive renewal failed; the subscription is now `past_due` | Apply your grace policy |
+| `subscription.past_due` | The 3rd consecutive renewal failed, or the trial-end charge failed; the subscription is now `past_due` (sent once per entry into `past_due`) | Apply your grace policy |
 | `subscription.cancelled` | The API ended the subscription: `data.subscription.cancelReason` is `period_end`, `dunning` or `abandoned`. **Not** sent for an immediate `cancel()` | Revoke access |
 | `subscription.plan_changed` | A `changePlan()` call was accepted (immediately, for all modes; `effectiveAt` tells when it applies) | Update the entitlements of the customer |
 | `subscription.plan_change_failed` | A scheduled `period_end` plan change could not be applied because the target plan was archived; the subscription renewed on its current plan | Tell the customer, pick another plan |
 
-Payloads are `{"id", "event", "createdAt", "data"}`. `payment.*` events carry `data.transaction`, `refund.*` events carry `data.refund`, `subscription.*` events carry `data.subscription` (plus `data.transaction` for `renewed` / `payment_failed`). `asTransaction()` reads `data.transaction`, `asRefund()` reads `data.refund`, `asSubscription()` reads `data.subscription` (each falls back to `data.object`, then `data`). Always rely on `$event->data` / `$event->rawPayload` when in doubt. Event names such as `checkout_session.completed` or `transaction.captured` (used in 0.1.0-era docs) **do not exist**; do not subscribe to or switch on them.
+Payloads are `{"id", "event", "createdAt", "data"}`. All amounts are integers in centimes, `payment.*` included. `payment.succeeded` / `payment.failed` carry `data.transaction` with `id`, `amount`, `currency`, `status`, `providerRef`, `metadata`, `paidAt` or `failedAt` (plus `vendorId` / split fields for marketplace payments). `payment.*` events carry `data.transaction`, `refund.*` events carry `data.refund`, `subscription.*` events carry `data.subscription` (plus `data.transaction` for `renewed` / `payment_failed`). `asTransaction()` reads `data.transaction`, `asRefund()` reads `data.refund`, `asSubscription()` reads `data.subscription` (each falls back to `data.object`, then `data`). Always rely on `$event->data` / `$event->rawPayload` when in doubt. Event names such as `checkout_session.completed` or `transaction.captured` (used in 0.1.0-era docs) **do not exist**; do not subscribe to or switch on them.
 
 ### Testing a webhook handler
 
@@ -701,12 +724,12 @@ try {
 
 | `errorCode` | HTTP | Meaning | What to do |
 |---|---|---|---|
-| `VALIDATION_ERROR` | 400 | Invalid parameters or an action not allowed in the current state (e.g. `repay()` on an active subscription, a failed proration). `$e->details` lists `[{field, message}]` for field errors | Read the message and `$e->details`, fix, do not retry as is |
+| `VALIDATION_ERROR` | 400 | Invalid parameters or an action not allowed in the current state (e.g. `repay()` on an active subscription, a failed proration). In production `$e->details` lists `[{field, message}]` for field errors | Read the message and `$e->details`, fix, do not retry as is |
 | `AUTHENTICATION_ERROR` | 401 (or 0 for a bad key format) | Missing/invalid key | Check the key and its prefix |
 | `AUTHORIZATION_ERROR` | 403 | Not allowed (e.g. downgrade without `allowDowngrade`) | Fix permissions or parameters |
 | `NOT_FOUND` | 404 | Unknown id, or an inactive plan | Check the id and the mode (test vs live) |
-| `CONFLICT` | 409 | The resource conflicts with an existing one (e.g. a customer with this email already exists) | Look up the existing resource instead of creating it |
-| `RATE_LIMIT_ERROR` | 429 | Too many requests (the SDK uses this code for every 429) | Back off |
+| `CONFLICT` | 409 | The resource conflicts with an existing one (e.g. a customer with this email already exists), a request with the same idempotency key is still running, or an expired payment link was updated | Use the existing resource; for an in-flight idempotent request, retry later with the same key |
+| `RATE_LIMIT_ERROR` | 429 | Too many requests (the API's own code is `RATE_LIMIT_EXCEEDED`; the SDK reports every 429 as `RATE_LIMIT_ERROR`) | Back off |
 | `PSP_ERROR` | 502 | The payment provider returned an error | Retry later |
 | `INTERNAL_ERROR` | 500 | Unexpected server error | Retry later |
 | `SERVER_ERROR` | 5xx | Server error without a readable error body | Retry later |
@@ -779,29 +802,29 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 | Method | Returns | Notes |
 |---|---|---|
 | `create(array $params, ?string $idempotencyKey = null)` | `CheckoutSession` | `successUrl`, `cancelUrl` required (`https://`); `amount` (centimes, 100 to 100 000 000; omit or null for an open amount), `currency` (MAD only, default), optional `customer` (`email`, `name`, `phone`), `lineItems`, `billingAddress`, `shippingAddress`, `paymentMethods` (`card`, `cash`; default `card`), `vendorId`, `require3ds` (default true), `metadata`. Expires after 30 minutes (48 h with cash) |
-| `retrieve(string $id)` | `CheckoutSession` | |
+| `retrieve(string $id)` | `CheckoutSession` | adds `successUrl`, `cancelUrl`, `metadata`, `transactionId`, `transactionStatus` |
 
 ### `$aslan->transactions` (`Transactions`, read-only)
 
 | Method | Returns | Notes |
 |---|---|---|
-| `list(array $query = [])` | `PaginatedResponse<Transaction>` | filters `status`, `from`, `to` (dates); `sortBy` (createdAt, amount, status), `sortOrder` (asc, desc) |
-| `retrieve(string $id)` | `Transaction` | |
+| `list(array $query = [])` | `PaginatedResponse<Transaction>` | filters `status` (pending, processing, succeeded, failed, expired, refunded, partially_refunded), `from`, `to` (dates); `sortBy` (createdAt, amount, status), `sortOrder` (asc, desc) |
+| `retrieve(string $id)` | `Transaction` | includes the refunds |
 
-`Transaction`: `id`, `amount`, `currency`, `status`, `paymentMethod`, `cardLast4`, `cardBrand`, `refundedAmount`, `reference`, `description`, `checkoutSessionId`, `paymentLinkId`, `metadata`, `createdAt`, `updatedAt`; helpers `isSuccessful()`, `isRefundable()`, `refundableAmount()`.
+`Transaction`: `id`, `amount`, `currency`, `status`, `providerRef`, `paidAt`, `failedAt`, `errorMessage`, `checkoutSessionId`, `refunds` (raw arrays), `refundedAmount` (sum of refunds not `failed` / `rejected`), `metadata`, `createdAt`, `updatedAt`; helpers `isSuccessful()` (`succeeded`), `isRefundable()` (`succeeded` or `partially_refunded` with an amount left), `refundableAmount()`. Status values: `pending`, `pending_cash`, `cash_late_confirmation`, `processing`, `succeeded`, `failed`, `expired`, `refunded`, `partially_refunded`. `list()` items carry no refunds, `checkoutSessionId`, `failedAt` or `updatedAt`; use `retrieve()` before deciding on a refund. Deprecated, always null: `paymentMethod`, `cardLast4`, `cardBrand`, `reference`, `description`, `paymentLinkId`.
 
 ### `$aslan->paymentLinks` (`PaymentLinks`)
 
 | Method | Returns | Notes |
 |---|---|---|
-| `create(array $params, ?string $idempotencyKey = null)` | `PaymentLink` | all optional: `amount` (centimes; omit for an open amount), `minAmount`, `maxAmount`, `currency` (MAD), `description` (max 500), `maxPayments`, `vendorId`, `expiresAt`, `metadata` |
-| `list(array $query = [])` | `PaginatedResponse<PaymentLink>` | filter `status`: active, inactive, expired, finalized |
+| `create(array $params, ?string $idempotencyKey = null)` | `PaymentLink` | all optional: `amount` (centimes; omit for an open amount), `minAmount`, `maxAmount`, `currency` (MAD), `description` (max 500), `maxPayments` (limit on payment attempts), `vendorId`, `expiresAt`, `metadata` |
+| `list(array $query = [])` | `PaginatedResponse<PaymentLink>` | filter `status`: active, inactive, expired, finalized (paid) |
 | `retrieve(string $id)` | `PaymentLink` | |
-| `update(string $id, array $params)` | `PaymentLink` | only `description`, `status` (active, inactive), `maxPayments`, `expiresAt`, `metadata` |
-| `delete(string $id)` | `bool` | soft delete |
+| `update(string $id, array $params)` | `PaymentLink` | only `description`, `status` (active, inactive), `maxPayments`, `expiresAt`, `metadata`; an expired link cannot be updated (409) |
+| `delete(string $id)` | `bool` | soft delete (status becomes `inactive`) |
 | `getQrCode(string $id)` | `array` | `dataUri` (base64 PNG data URI), `mimeType` |
 
-`PaymentLink`: `id`, `title`, `url`, `slug`, `status`, `amount`, `currency`, `openAmount`, `description`, `maxUses`, `usageCount`, `successUrl`, `cancelUrl`, `expiresAt`, `metadata`, `createdAt`, `updatedAt`; helpers `isActive()`, `hasReachedMaxUses()`.
+`PaymentLink`: `id`, `url`, `shortCode`, `status`, `purpose` (`payment`, or `change_card` / `repay` for links minted by subscriptions), `amount`, `minAmount`, `maxAmount`, `currency`, `openAmount` (`amount === null`), `description`, `maxPayments`, `paymentCount` (payment attempts started from the link), `vendorId`, `expiresAt`, `metadata`, `createdAt`, `updatedAt`; helpers `isActive()`, `isFinalized()` (paid), `hasReachedMaxUses()` (`paymentCount >= maxPayments`). Deprecated aliases: `title` (= `description`), `slug` (= `shortCode`), `maxUses` (= `maxPayments`), `usageCount` (= `paymentCount`); `successUrl` / `cancelUrl` are always null.
 
 ### `$aslan->refunds` (`Refunds`)
 
@@ -817,23 +840,23 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 
 | Method | Returns | Notes |
 |---|---|---|
-| `create(array $params, ?string $idempotencyKey = null)` | `Vendor` | `name` required; optional `externalId`, `email`, `commissionRate` (0 to 1), `metadata`. The idempotency key is ignored by the API |
+| `create(array $params, ?string $idempotencyKey = null)` | `Vendor` | `name` required; optional `externalId`, `email`, `commissionRate` (0 to 1), `metadata`. Only for a merchant configured as a marketplace (400 otherwise). The idempotency key is ignored by the API |
 | `list(array $query = [])` | `PaginatedResponse<Vendor>` | `page`, `limit` (not `pageSize`; max 100), filters `search`, `isActive` (`"true"` / `"false"`) |
 | `retrieve(string $id)` | `Vendor` | |
 | `update(string $id, array $params)` | `Vendor` | `name`, `email`, `commissionRate`, `externalId`, `isActive`, `metadata` |
 | `delete(string $id)` | `bool` | deactivates the vendor (`isActive: false`) |
 
-`Vendor`: `id`, `name`, `code`, `status`, `email`, `phone`, `ice`, `iban`, `settledAmount`, `pendingAmount`, `metadata`, `createdAt`, `updatedAt`; helper `isActive()`.
+`Vendor`: `id`, `name`, `externalId`, `email`, `commissionRate` (`?float`), `status` (`active` / `inactive`, from the API's `isActive`), `metadata`, `createdAt`, `updatedAt`; helper `isActive()`. Deprecated: `code` (= `externalId`), and `phone`, `ice`, `iban`, `settledAmount`, `pendingAmount`, which the API never returns.
 
 ### `$aslan->customers` (`Customers`)
 
 | Method | Returns | Notes |
 |---|---|---|
 | `create(array $params)` | `Customer` | at least one of `email` / `phone` required; `email` unique per merchant (duplicate: HTTP 409, `CONFLICT`); `phone` `+212XXXXXXXXX`; optional `name` (max 200), `metadata` (string map). No idempotency key (not supported by the API) |
-| `list(array $query = [])` | `PaginatedResponse<Customer>` | `search`, `sortBy` (createdAt, email, name), `sortOrder` (asc, desc) |
-| `retrieve(string $id)` | `Customer` | |
+| `list(array $query = [])` | `PaginatedResponse<Customer>` | `search` (matched against the stored columns; encrypted emails and names are not found), `sortBy` (createdAt, email, name), `sortOrder` (asc, desc) |
+| `retrieve(string $id)` | `Customer` | includes the transaction totals |
 
-`Customer`: `id`, `email`, `phone`, `firstName`, `lastName`, `name`, `country`, `totalSpend`, `transactionCount`, `metadata`, `createdAt`, `updatedAt`; helper `displayName()`.
+`Customer`: `id`, `email`, `phone`, `name`, `metadata` (internal keys such as `encryptedEmail` removed), `totalSpend` (sum of all the customer's transaction amounts, any status), `transactionCount` (all transactions), `successfulTransactionCount`, `createdAt`, `updatedAt`; helper `displayName()`. The totals come from `retrieve()` only (0 on `create()` / `list()`). Deprecated, always null: `firstName`, `lastName`, `country`.
 
 ### `$aslan->apiKeys` (`ApiKeys`)
 
@@ -843,7 +866,7 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 | `list(array $query = [])` | `PaginatedResponse<ApiKey>` | returns all keys at once (no pagination or filters) |
 | `delete(string $id)` | `bool` | revokes permanently |
 
-`ApiKey`: `id`, `name`, `environment`, `prefix`, `secretKey` (`?string`), `status`, `lastUsedAt`, `createdAt`; helpers `isActive()`, `isLive()`, `isTest()`.
+`ApiKey`: `id`, `name`, `type` (`live` / `test`), `prefix`, `secretKey` (`?string`, `create()` only), `publishableKey`, `status` (`active` / `revoked`, from the API's `isActive`; `create()` reports `active`), `lastUsedAt`, `revokedAt`, `createdAt`; helpers `isActive()`, `isLive()`, `isTest()`. `environment` is a deprecated alias of `type`.
 
 ### `$aslan->webhooksConfig` (`WebhooksConfig`)
 
@@ -866,7 +889,7 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 
 | Method | Returns | Notes |
 |---|---|---|
-| `create(array $params)` | `Plan` | `name`, `amount`, `currency` (default MAD), `interval`; optional `intervalCount` (1-12), `trialDays`, `metadata` |
+| `create(array $params)` | `Plan` | `name`, `amount` (centimes, >= 1), `currency` (default MAD), `interval`; optional `intervalCount` (1-12), `trialDays` (>= 0), `metadata` |
 | `list(array $query = [])` | `PaginatedResponse<Plan>` | filter `isActive` (bool, serialised for you) |
 | `retrieve(string $id)` | `Plan` | |
 | `update(string $id, array $params)` | `Plan` | only `name`, `isActive`, `metadata` |
@@ -894,7 +917,7 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 | Method | Returns | Notes |
 |---|---|---|
 | `list(array $query = [])` | `PaginatedResponse<BillingAttempt>` | filters `subscriptionId`, `status` (pending, succeeded, failed), `type` (initial, renewal, proration) |
-| `receipt(string $id)` | `DocumentData` | `issuer`, `customer`, `lines`, `currency`, `totalHt`, `totalTva`, `totalTtc`, `issuedAt` |
+| `receipt(string $id)` | `DocumentData` | `issuer`, `customer`, `lines`, `currency`, `totalHt`, `totalTva`, `totalTtc`, `issuedAt`; `succeeded` attempts only, not a trial verification |
 | `receiptPdf(string $id)` | `string` | raw PDF bytes |
 | `facture(string $id)` | `Invoice` | facture mode only, idempotent |
 
@@ -912,14 +935,9 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 
 ### Known gaps in 0.2.0
 
-Some DTOs from 0.1.0 do not yet match what the API returns. Read the fields you need from the API's own names until they are aligned:
-
-- `CheckoutSession::isPending()` / `isCompleted()` test `pending` / `completed`; the API uses `open` / `complete`. `reference` and `description` are always null, and `transactionId` is null too (the API nests the transaction as `transaction.id`, which the DTO does not read). Take the transaction id from the `payment.succeeded` webhook.
-- `Transaction::isSuccessful()` / `isRefundable()` test `authorized` / `captured`; the API uses `succeeded`, so both return false. Check `$transaction->status === 'succeeded'`.
-- `PaymentLink`: the API has no `title`, `slug`, `maxUses` or `usageCount` (it uses `description`, `maxPayments`, `paymentCount`), so those properties hold defaults and `hasReachedMaxUses()` is always false.
-- `Vendor`: the API has no `code`, `phone`, `ice`, `iban` or `status` (it uses `isActive`), so `isActive()` always returns true.
-- `ApiKey`: the API returns the mode as `type`; `environment` defaults to `live`, so `isLive()` / `isTest()` are unreliable. Use the `sk_live_` / `sk_test_` prefix of `secretKey`.
-- `Customer`: the API returns no `firstName`, `lastName` or `country`; `totalSpend` / `transactionCount` stay 0 (`retrieve()` data has them under `transactions.totalAmount` / `transactions.count`, which the DTO does not read).
+- `list()` results carry fewer fields than `retrieve()`: transaction list items have no refunds (so `refundedAmount` is 0 and `isRefundable()` assumes nothing was refunded), customer list items have no totals, subscription list items have no `customer` / `card`. Call `retrieve()` when you need those.
+- `Transaction::$amount` is an `int`; a transaction whose amount is not known yet (open-amount session before the payer chose it) reads as `0`.
+- The deprecated DTO properties listed above (kept for 0.1.0 compatibility) are never filled by the API; do not build on them.
 
 ### Custom HTTP client
 
@@ -947,6 +965,8 @@ Compact rules for AI assistants generating code with this SDK. A longer copy liv
 12. Do not downgrade PHP constraints or `composer.json` floors to make an install pass; upgrade PHP instead.
 13. Create the customer with `$aslan->customers->create([...])` (email and/or `+212XXXXXXXXX` phone) before `subscriptions->create`; a duplicate email throws `AslanException` with `getCode() === 409`.
 14. All `successUrl` / `cancelUrl` / `returnUrl` / `callbackUrl` / webhook URLs must be `https://`.
+15. A plan with `trialDays > 0` charges only a refunded verification amount (1.00 MAD by default) at signup; the first real charge is at `trialEndsAt` and arrives as `subscription.renewed`. A `payment.succeeded` whose `data.transaction.metadata` has `__trialVerification` or `__changeCard` set to `true` is a verification charge, not a sale.
+16. A payment link is paid once (then `finalized`); create one per invoice.
 
 ### Decision table: user intent to SDK call
 
@@ -1047,6 +1067,8 @@ catch (\Aslan\Payment\AslanException $e) {
 - Passing `$idempotencyKey` to `plans->create` / `subscriptions->create` / `customers->create` (not supported), or relying on it for `vendors` / `apiKeys` / `webhooksConfig` (ignored by the API).
 - Expecting `subscription.cancelled` after your own immediate `cancel()` call (none is sent), or `payment.succeeded` for renewals (they send `subscription.renewed`).
 - Calling `repay()` on anything but a `pending_initial` subscription.
+- Booking a `payment.succeeded` whose metadata has `__trialVerification` / `__changeCard` = `true` as revenue (it is a refunded card check).
+- Looking a customer up by email with `customers->list(['search' => ...])` (encrypted; store the customer id instead).
 - Treating `Subscription::$status` from a webhook-derived `asSubscription()` as authoritative (it can be null); call `retrieve()`.
 - Installing on an unpatched PHP or relaxing the PHP constraint.
 

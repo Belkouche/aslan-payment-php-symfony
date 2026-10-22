@@ -112,7 +112,9 @@ final class AslanTest extends TestCase
         self::assertSame('cs_abc123', $session->id);
         self::assertSame(5000, $session->amount);
         self::assertSame('MAD', $session->currency);
-        self::assertSame('pending', $session->status);
+        self::assertSame('open', $session->status);
+        self::assertTrue($session->isPending());
+        self::assertNull($session->transactionId);
         self::assertFalse($session->openAmount);
         self::assertSame('https://pay.aslanpay.ma/checkout/tok_abc', $session->url);
     }
@@ -148,12 +150,54 @@ final class AslanTest extends TestCase
 
     public function test_checkout_session_status_helpers(): void
     {
-        $data    = array_merge($this->checkoutSessionPayload(), ['status' => 'completed']);
+        $data    = array_merge($this->checkoutSessionPayload(), ['status' => 'complete']);
         $session = CheckoutSession::fromArray($data);
 
         self::assertTrue($session->isCompleted());
         self::assertFalse($session->isPending());
         self::assertFalse($session->isExpired());
+
+        foreach (['open', 'awaiting_cash', 'processing'] as $status) {
+            $pending = CheckoutSession::fromArray(array_merge($data, ['status' => $status]));
+            self::assertTrue($pending->isPending(), $status);
+            self::assertFalse($pending->isCompleted(), $status);
+        }
+
+        self::assertTrue(CheckoutSession::fromArray(array_merge($data, ['status' => 'expired']))->isExpired());
+    }
+
+    public function test_checkout_session_retrieve_reads_nested_transaction(): void
+    {
+        $session = CheckoutSession::fromArray(array_merge($this->checkoutSessionPayload(), [
+            'status'      => 'complete',
+            'successUrl'  => 'https://shop.example/thanks',
+            'cancelUrl'   => 'https://shop.example/cart',
+            'metadata'    => ['orderId' => '1042'],
+            'transaction' => [
+                'id'          => '11111111-1111-4111-8111-111111111111',
+                'status'      => 'succeeded',
+                'providerRef' => 'pz_1',
+                'paidAt'      => '2026-04-18T11:05:00.000Z',
+                'failedAt'    => null,
+            ],
+        ]));
+
+        self::assertSame('11111111-1111-4111-8111-111111111111', $session->transactionId);
+        self::assertSame('succeeded', $session->transactionStatus);
+        self::assertSame('https://shop.example/thanks', $session->successUrl);
+        self::assertSame(['orderId' => '1042'], $session->metadata);
+    }
+
+    public function test_checkout_session_open_amount_derived_from_null_amount(): void
+    {
+        $data = $this->checkoutSessionPayload();
+        unset($data['openAmount']);
+        $data['amount'] = null;
+
+        $session = CheckoutSession::fromArray($data);
+
+        self::assertNull($session->amount);
+        self::assertTrue($session->openAmount);
     }
 
     // ------------------------------------------------------------------
@@ -187,18 +231,64 @@ final class AslanTest extends TestCase
         self::assertSame('txn_xyz', $txn->id);
         self::assertSame(5000, $txn->amount);
         self::assertTrue($txn->isSuccessful());
+        self::assertTrue($txn->isRefundable());
+        self::assertSame('pz_ref_1', $txn->providerRef);
+        self::assertSame('2026-04-18T11:01:00.000Z', $txn->paidAt);
+        self::assertSame('cs_abc123', $txn->checkoutSessionId);
     }
 
-    public function test_transaction_refundable_amount(): void
+    public function test_transaction_refundable_amount_from_refunds(): void
     {
         $txn = Transaction::fromArray(array_merge($this->transactionPayload(), [
-            'status'         => 'partially_refunded',
-            'amount'         => 5000,
-            'refundedAmount' => 2000,
+            'status'  => 'partially_refunded',
+            'amount'  => 5000,
+            'refunds' => [
+                ['id' => 'r1', 'amount' => 2000, 'currency' => 'MAD', 'status' => 'succeeded'],
+                ['id' => 'r2', 'amount' => 500,  'currency' => 'MAD', 'status' => 'pending'],
+                ['id' => 'r3', 'amount' => 900,  'currency' => 'MAD', 'status' => 'failed'],
+                ['id' => 'r4', 'amount' => 900,  'currency' => 'MAD', 'status' => 'rejected'],
+            ],
         ]));
 
-        self::assertSame(3000, $txn->refundableAmount());
+        self::assertSame(2500, $txn->refundedAmount);
+        self::assertSame(2500, $txn->refundableAmount());
         self::assertTrue($txn->isRefundable());
+        self::assertFalse($txn->isSuccessful());
+        self::assertCount(4, $txn->refunds);
+    }
+
+    public function test_transaction_status_helpers_match_api_statuses(): void
+    {
+        foreach (['pending', 'pending_cash', 'cash_late_confirmation', 'processing', 'failed', 'expired', 'refunded'] as $status) {
+            $txn = Transaction::fromArray(array_merge($this->transactionPayload(), ['status' => $status]));
+            self::assertFalse($txn->isSuccessful(), $status);
+            self::assertFalse($txn->isRefundable(), $status);
+        }
+
+        $fullyRefunded = Transaction::fromArray(array_merge($this->transactionPayload(), [
+            'status'  => 'partially_refunded',
+            'refunds' => [['amount' => 5000, 'status' => 'succeeded']],
+        ]));
+        self::assertFalse($fullyRefunded->isRefundable());
+    }
+
+    public function test_transaction_list_item_with_null_amount(): void
+    {
+        $txn = Transaction::fromArray([
+            'id'          => 'txn_open',
+            'amount'      => null,
+            'currency'    => 'MAD',
+            'status'      => 'pending',
+            'providerRef' => null,
+            'customer'    => ['email' => 'jane@example.ma'],
+            'metadata'    => [],
+            'paidAt'      => null,
+            'createdAt'   => '2026-04-18T11:00:00.000Z',
+        ]);
+
+        self::assertSame(0, $txn->amount);
+        self::assertSame(0, $txn->refundedAmount);
+        self::assertSame('', $txn->updatedAt);
     }
 
     // ------------------------------------------------------------------
@@ -211,11 +301,22 @@ final class AslanTest extends TestCase
             ->method('request')
             ->willReturn(['data' => $this->paymentLinkPayload()]);
 
-        $link = $this->client->paymentLinks->create(['title' => 'Donation']);
+        $link = $this->client->paymentLinks->create(['description' => 'Donation']);
 
         self::assertInstanceOf(PaymentLink::class, $link);
         self::assertSame('pl_def456', $link->id);
         self::assertTrue($link->isActive());
+        self::assertSame('Donation', $link->description);
+        self::assertSame('aBc123', $link->shortCode);
+        self::assertSame(1000, $link->minAmount);
+        self::assertNull($link->maxPayments);
+        self::assertSame(3, $link->paymentCount);
+        self::assertTrue($link->openAmount);
+        self::assertSame('payment', $link->purpose);
+        // deprecated aliases stay populated
+        self::assertSame('Donation', $link->title);
+        self::assertSame('aBc123', $link->slug);
+        self::assertSame(3, $link->usageCount);
     }
 
     public function test_payment_link_list(): void
@@ -232,7 +333,7 @@ final class AslanTest extends TestCase
 
     public function test_payment_link_update(): void
     {
-        $updated = array_merge($this->paymentLinkPayload(), ['title' => 'Updated Title']);
+        $updated = array_merge($this->paymentLinkPayload(), ['description' => 'Updated']);
 
         $this->mockHttp
             ->expects(self::once())
@@ -240,9 +341,9 @@ final class AslanTest extends TestCase
             ->with('PATCH', self::stringContains('/pl_def456'))
             ->willReturn(['data' => $updated]);
 
-        $link = $this->client->paymentLinks->update('pl_def456', ['title' => 'Updated Title']);
+        $link = $this->client->paymentLinks->update('pl_def456', ['description' => 'Updated']);
 
-        self::assertSame('Updated Title', $link->title);
+        self::assertSame('Updated', $link->description);
     }
 
     public function test_payment_link_delete(): void
@@ -260,21 +361,27 @@ final class AslanTest extends TestCase
     {
         $this->mockHttp
             ->method('request')
-            ->willReturn(['data' => ['qrCodeUrl' => 'https://cdn.aslanpay.ma/qr/pl_def456.png']]);
+            ->willReturn(['data' => ['dataUri' => 'data:image/png;base64,AAAA', 'mimeType' => 'image/png']]);
 
         $qr = $this->client->paymentLinks->getQrCode('pl_def456');
 
-        self::assertArrayHasKey('qrCodeUrl', $qr);
+        self::assertSame('image/png', $qr['mimeType']);
     }
 
     public function test_payment_link_max_uses_check(): void
     {
         $link = PaymentLink::fromArray(array_merge($this->paymentLinkPayload(), [
-            'maxUses'    => 10,
-            'usageCount' => 10,
+            'maxPayments'  => 10,
+            'paymentCount' => 10,
         ]));
 
         self::assertTrue($link->hasReachedMaxUses());
+        self::assertSame(10, $link->maxUses);
+
+        $paid = PaymentLink::fromArray(array_merge($this->paymentLinkPayload(), ['status' => 'finalized']));
+        self::assertTrue($paid->isFinalized());
+        self::assertFalse($paid->isActive());
+        self::assertFalse(PaymentLink::fromArray($this->paymentLinkPayload())->hasReachedMaxUses());
     }
 
     // ------------------------------------------------------------------
@@ -320,11 +427,45 @@ final class AslanTest extends TestCase
             ->method('request')
             ->willReturn(['data' => $this->vendorPayload()]);
 
-        $vendor = $this->client->vendors->create(['name' => 'Acme', 'code' => 'ACME']);
+        $vendor = $this->client->vendors->create(['name' => 'Acme', 'externalId' => 'ACME']);
 
         self::assertInstanceOf(Vendor::class, $vendor);
         self::assertSame('ven_jkl012', $vendor->id);
         self::assertTrue($vendor->isActive());
+        self::assertSame('active', $vendor->status);
+        self::assertSame('ACME', $vendor->externalId);
+        self::assertSame('ACME', $vendor->code);
+        self::assertSame(0.1, $vendor->commissionRate);
+    }
+
+    public function test_vendor_inactive_from_is_active_flag(): void
+    {
+        $vendor = Vendor::fromArray(array_merge($this->vendorPayload(), ['isActive' => false, 'commissionRate' => null]));
+
+        self::assertFalse($vendor->isActive());
+        self::assertSame('inactive', $vendor->status);
+        self::assertNull($vendor->commissionRate);
+    }
+
+    public function test_vendor_list_reads_top_level_pagination(): void
+    {
+        $this->mockHttp
+            ->method('request')
+            ->willReturn([
+                'data'       => [$this->vendorPayload()],
+                'total'      => 45,
+                'page'       => 2,
+                'limit'      => 20,
+                'totalPages' => 3,
+            ]);
+
+        $result = $this->client->vendors->list(['page' => 2, 'limit' => 20]);
+
+        self::assertSame(2, $result->page);
+        self::assertSame(20, $result->pageSize);
+        self::assertSame(45, $result->total);
+        self::assertSame(3, $result->totalPages);
+        self::assertTrue($result->hasNextPage());
     }
 
     public function test_vendor_update(): void
@@ -379,6 +520,33 @@ final class AslanTest extends TestCase
 
         self::assertSame('cus_mno345', $customer->id);
         self::assertSame('Jane Doe', $customer->displayName());
+        self::assertSame(15000, $customer->totalSpend);
+        self::assertSame(3, $customer->transactionCount);
+        self::assertSame(2, $customer->successfulTransactionCount);
+        self::assertNull($customer->firstName);
+    }
+
+    public function test_customer_list_drops_internal_encrypted_email_metadata(): void
+    {
+        $this->mockHttp
+            ->method('request')
+            ->willReturn([
+                'data' => [[
+                    'id'        => 'cus_1',
+                    'email'     => 'jane@example.ma',
+                    'name'      => null,
+                    'phone'     => null,
+                    'metadata'  => ['encryptedEmail' => 'enc:v1:iv:ct:tag', 'crmId' => '42'],
+                    'createdAt' => '2026-04-01T08:00:00.000Z',
+                    'updatedAt' => '2026-04-01T08:00:00.000Z',
+                ]],
+                'pagination' => ['total' => 1, 'page' => 1, 'pageSize' => 20, 'totalPages' => 1],
+            ]);
+
+        $customer = $this->client->customers->list()->data[0];
+
+        self::assertSame(['crmId' => '42'], $customer->metadata);
+        self::assertSame(0, $customer->totalSpend);
     }
 
     public function test_customer_create_sends_params_and_parses_response(): void
@@ -441,12 +609,33 @@ final class AslanTest extends TestCase
             ->method('request')
             ->willReturn(['data' => $this->apiKeyPayload(withSecret: true)]);
 
-        $key = $this->client->apiKeys->create(['name' => 'Production key']);
+        $key = $this->client->apiKeys->create(['name' => 'Production key', 'type' => 'live']);
 
         self::assertInstanceOf(ApiKey::class, $key);
         self::assertNotNull($key->secretKey);
+        self::assertSame('live', $key->type);
         self::assertTrue($key->isLive());
+        self::assertFalse($key->isTest());
         self::assertTrue($key->isActive());
+    }
+
+    public function test_api_key_list_reads_type_and_is_active(): void
+    {
+        $this->mockHttp
+            ->method('request')
+            ->willReturn(['data' => [
+                array_merge($this->apiKeyPayload(), ['type' => 'test', 'isActive' => false, 'revokedAt' => '2026-04-19T08:00:00.000Z']),
+            ]]);
+
+        $key = $this->client->apiKeys->list()->data[0];
+
+        self::assertSame('test', $key->type);
+        self::assertSame('test', $key->environment);
+        self::assertTrue($key->isTest());
+        self::assertFalse($key->isLive());
+        self::assertFalse($key->isActive());
+        self::assertSame('revoked', $key->status);
+        self::assertSame('2026-04-19T08:00:00.000Z', $key->revokedAt);
     }
 
     public function test_api_key_list_does_not_expose_secret(): void
@@ -713,47 +902,60 @@ final class AslanTest extends TestCase
             'url'        => 'https://pay.aslanpay.ma/checkout/tok_abc',
             'amount'     => 5000,
             'currency'   => 'MAD',
-            'status'     => 'pending',
-            'openAmount' => false,
-            'metadata'   => [],
-            'expiresAt'  => '2026-04-18T12:00:00Z',
-            'createdAt'  => '2026-04-18T11:00:00Z',
-            'updatedAt'  => '2026-04-18T11:00:00Z',
+            'status'       => 'open',
+            'openAmount'   => false,
+            'expiresAt'    => '2026-04-18T12:00:00Z',
+            'createdAt'    => '2026-04-18T11:00:00Z',
+            'cryptoScheme' => 'rsa-oaep-aes-gcm',
         ];
     }
 
     private function transactionPayload(): array
     {
         return [
-            'id'             => 'txn_xyz',
-            'amount'         => 5000,
-            'currency'       => 'MAD',
-            'status'         => 'captured',
-            'paymentMethod'  => 'card',
-            'cardLast4'      => '4242',
-            'cardBrand'      => 'visa',
-            'refundedAmount' => 0,
-            'metadata'       => [],
-            'createdAt'      => '2026-04-18T11:00:00Z',
-            'updatedAt'      => '2026-04-18T11:00:00Z',
+            'id'                => 'txn_xyz',
+            'amount'            => 5000,
+            'currency'          => 'MAD',
+            'status'            => 'succeeded',
+            'type'              => 'payment',
+            'providerRef'       => 'pz_ref_1',
+            'providerStatus'    => 'succeeded',
+            'checkoutSessionId' => 'cs_abc123',
+            'metadata'          => [],
+            'errorCode'         => null,
+            'errorMessage'      => null,
+            'paidAt'            => '2026-04-18T11:01:00.000Z',
+            'failedAt'          => null,
+            'expiresAt'         => null,
+            'createdAt'         => '2026-04-18T11:00:00Z',
+            'updatedAt'         => '2026-04-18T11:01:00Z',
+            'customer'          => ['email' => 'jane@example.ma', 'name' => 'Jane Doe'],
+            'refunds'           => [],
         ];
     }
 
     private function paymentLinkPayload(): array
     {
         return [
-            'id'         => 'pl_def456',
-            'title'      => 'Donation',
-            'url'        => 'https://pay.aslanpay.ma/l/donation',
-            'slug'       => 'donation',
-            'status'     => 'active',
-            'amount'     => null,
-            'currency'   => 'MAD',
-            'openAmount' => true,
-            'usageCount' => 3,
-            'metadata'   => [],
-            'createdAt'  => '2026-04-18T10:00:00Z',
-            'updatedAt'  => '2026-04-18T10:00:00Z',
+            'id'             => 'pl_def456',
+            'merchantId'     => '99999999-9999-4999-8999-999999999999',
+            'shortCode'      => 'aBc123',
+            'amount'         => null,
+            'minAmount'      => 1000,
+            'maxAmount'      => null,
+            'currency'       => 'MAD',
+            'description'    => 'Donation',
+            'status'         => 'active',
+            'purpose'        => 'payment',
+            'subscriptionId' => null,
+            'maxPayments'    => null,
+            'paymentCount'   => 3,
+            'expiresAt'      => null,
+            'vendorId'       => null,
+            'metadata'       => [],
+            'createdAt'      => '2026-04-18T10:00:00Z',
+            'updatedAt'      => '2026-04-18T10:00:00Z',
+            'url'            => 'https://pay.aslan.ma/pl/aBc123',
         ];
     }
 
@@ -774,45 +976,53 @@ final class AslanTest extends TestCase
     private function vendorPayload(): array
     {
         return [
-            'id'            => 'ven_jkl012',
-            'name'          => 'Acme',
-            'code'          => 'ACME',
-            'status'        => 'active',
-            'settledAmount' => 0,
-            'pendingAmount' => 0,
-            'metadata'      => [],
-            'createdAt'     => '2026-04-18T09:00:00Z',
-            'updatedAt'     => '2026-04-18T09:00:00Z',
+            'id'             => 'ven_jkl012',
+            'merchantId'     => '99999999-9999-4999-8999-999999999999',
+            'externalId'     => 'ACME',
+            'name'           => 'Acme',
+            'email'          => null,
+            'commissionRate' => '0.1',
+            'isActive'       => true,
+            'metadata'       => [],
+            'createdAt'      => '2026-04-18T09:00:00Z',
+            'updatedAt'      => '2026-04-18T09:00:00Z',
         ];
     }
 
     private function customerPayload(): array
     {
         return [
-            'id'               => 'cus_mno345',
-            'email'            => 'jane@example.ma',
-            'phone'            => '+212600000004',
-            'firstName'        => 'Jane',
-            'lastName'         => 'Doe',
-            'totalSpend'       => 15000,
-            'transactionCount' => 3,
-            'metadata'         => [],
-            'createdAt'        => '2026-04-01T08:00:00Z',
-            'updatedAt'        => '2026-04-18T11:00:00Z',
+            'id'           => 'cus_mno345',
+            'email'        => 'jane@example.ma',
+            'name'         => 'Jane Doe',
+            'phone'        => '+212600000004',
+            'metadata'     => [],
+            'createdAt'    => '2026-04-01T08:00:00Z',
+            'updatedAt'    => '2026-04-18T11:00:00Z',
+            'transactions' => [
+                'count'        => 3,
+                'totalAmount'  => 15000,
+                'currency'     => 'MAD',
+                'successCount' => 2,
+                'failedCount'  => 1,
+            ],
+            'subscriptions' => [],
+            'cards'         => [],
         ];
     }
 
     private function apiKeyPayload(bool $withSecret = false): array
     {
         return [
-            'id'          => 'key_pqr678',
-            'name'        => 'Production key',
-            'environment' => 'live',
-            'prefix'      => 'testPrefix',
-            'secretKey'   => $withSecret ? 'sk_live_testPrefix_fullsecret' : null,
-            'status'      => 'active',
-            'createdAt'   => '2026-04-18T08:00:00Z',
-        ];
+            'id'             => 'key_pqr678',
+            'name'           => 'Production key',
+            'type'           => 'live',
+            'prefix'         => 'testPrefix',
+            'publishableKey' => 'pk_live_testPrefix',
+            'createdAt'      => '2026-04-18T08:00:00Z',
+        ] + ($withSecret
+            ? ['secretKey' => 'sk_live_testPrefix_fullsecret']
+            : ['isActive' => true, 'lastUsedAt' => null, 'revokedAt' => null]);
     }
 
     private function webhookConfigPayload(bool $withSecret = false): array

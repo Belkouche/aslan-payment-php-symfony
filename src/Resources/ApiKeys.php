@@ -25,9 +25,9 @@ final class ApiKeys
      *
      * Required params:
      *  - name (string) — human-readable label
+     *  - type (string) — "live" | "test"
      *
-     * Optional params:
-     *  - environment (string) — "live" | "test" (default: mirrors the current key)
+     * The API ignores the idempotency key on this route.
      *
      * @param  array<string, mixed> $params
      * @param  string|null          $idempotencyKey
@@ -47,11 +47,7 @@ final class ApiKeys
     /**
      * List API keys.
      *
-     * Query params:
-     *  - page (int, default 1)
-     *  - pageSize (int, default 20, max 100)
-     *  - environment (string) — live | test
-     *  - status (string) — active | revoked
+     * The API returns every key at once (no pagination or filters).
      *
      * @param  array<string, mixed> $query
      * @return PaginatedResponse<ApiKey>

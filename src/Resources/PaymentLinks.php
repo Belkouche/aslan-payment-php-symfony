@@ -11,9 +11,9 @@ use Aslan\Payment\Dto\PaymentLink;
 /**
  * Payment Links resource.
  *
- * Payment links are reusable, shareable URLs that allow customers to pay
- * without requiring a checkout session per transaction. Useful for invoices,
- * recurring donations, or social-media payment links.
+ * Payment links are shareable URLs (with a QR code) that start a hosted payment.
+ * A link is paid at most once: after a successful payment the API marks it
+ * `finalized` and refuses further payments.
  *
  * @see https://docs.aslanpay.ma/api/payment-links
  */
@@ -24,20 +24,15 @@ final class PaymentLinks
     /**
      * Create a new payment link.
      *
-     * Required params:
-     *  - title (string)
-     *
-     * Optional params:
-     *  - amount (int, centimes) — omit or set openAmount=true for open-amount
-     *  - openAmount (bool)
-     *  - currency (string, default "MAD")
-     *  - description (string)
-     *  - slug (string) — custom URL slug (auto-generated if omitted)
-     *  - maxUses (int) — limit total number of payments
-     *  - successUrl (string)
-     *  - cancelUrl (string)
+     * All params are optional:
+     *  - amount (int, centimes) — omit or null for an open amount
+     *  - minAmount, maxAmount (int, centimes) — bounds for an open amount
+     *  - currency (string, "MAD" only, default)
+     *  - description (string, max 500)
+     *  - maxPayments (int, >= 1) — limit the number of payment attempts
+     *  - vendorId (uuid)
      *  - expiresAt (string, ISO 8601)
-     *  - metadata (array)
+     *  - metadata (array<string, string>)
      *
      * @param  array<string, mixed> $params
      * @param  string|null          $idempotencyKey
@@ -60,7 +55,7 @@ final class PaymentLinks
      * Query params:
      *  - page (int, default 1)
      *  - pageSize (int, default 20, max 100)
-     *  - status (string) — active | inactive | expired
+     *  - status (string) — active | inactive | expired | finalized
      *
      * @param  array<string, mixed>    $query
      * @return PaginatedResponse<PaymentLink>
@@ -88,11 +83,8 @@ final class PaymentLinks
     /**
      * Update an existing payment link.
      *
-     * Updatable fields:
-     *  - title, description, amount, status, maxUses, successUrl, cancelUrl,
-     *    expiresAt, metadata
-     *
-     * Note: slug, currency, and openAmount cannot be changed after creation.
+     * Updatable fields: description, status (active | inactive), maxPayments,
+     * expiresAt, metadata. An expired link cannot be updated (HTTP 409).
      *
      * @param  array<string, mixed> $params
      */
@@ -104,7 +96,7 @@ final class PaymentLinks
     }
 
     /**
-     * Delete (deactivate) a payment link permanently.
+     * Soft-delete a payment link (the API sets its status to `inactive`).
      */
     public function delete(string $id): bool
     {
@@ -116,10 +108,9 @@ final class PaymentLinks
     /**
      * Generate a QR code for the payment link.
      *
-     * Returns the raw response array which typically contains:
-     *  - qrCodeUrl (string) — URL to the QR code image
-     *  - qrCodeDataUrl (string) — base64 data URL for inline embedding
-     *  - paymentUrl (string) — the link URL encoded in the QR
+     * Returns the raw response array:
+     *  - dataUri (string) — base64 PNG data URI for inline embedding
+     *  - mimeType (string) — image/png
      *
      * @return array<string, mixed>
      */

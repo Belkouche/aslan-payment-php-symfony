@@ -9,6 +9,9 @@ namespace Aslan\Payment\Dto;
  */
 final readonly class Customer
 {
+    /** Internal API metadata keys that are never exposed in $metadata. */
+    private const INTERNAL_METADATA_KEYS = ['encryptedEmail'];
+
     public function __construct(
         public string  $id,
 
@@ -17,25 +20,38 @@ final readonly class Customer
         /** Moroccan phone in +212XXXXXXXXX format */
         public ?string $phone,
 
+        /** @deprecated The API does not return it; always null. Use $name. */
         public ?string $firstName,
+
+        /** @deprecated The API does not return it; always null. Use $name. */
         public ?string $lastName,
 
-        /** Full name as provided by the customer (may differ from first+last) */
+        /** Full name */
         public ?string $name,
 
-        /** ISO 3166-1 alpha-2 country code */
+        /** @deprecated The API does not return it; always null. */
         public ?string $country,
 
-        /** Total lifetime spend in centimes */
+        /**
+         * Sum in centimes of the amounts of all the customer's transactions, whatever their
+         * status (the API's `transactions.totalAmount`). Only `retrieve()` returns it; 0 otherwise.
+         */
         public int     $totalSpend,
 
-        /** Number of successful transactions */
+        /**
+         * Number of the customer's transactions, whatever their status (the API's
+         * `transactions.count`). Only `retrieve()` returns it; 0 otherwise.
+         */
         public int     $transactionCount,
 
+        /** Your metadata (internal API keys such as `encryptedEmail` are removed) */
         public array   $metadata,
 
         public string  $createdAt,
         public string  $updatedAt,
+
+        /** Number of succeeded transactions (`retrieve()` only; 0 otherwise) */
+        public int     $successfulTransactionCount = 0,
     ) {}
 
     /**
@@ -43,6 +59,12 @@ final readonly class Customer
      */
     public static function fromArray(array $data): self
     {
+        $summary  = is_array($data['transactions'] ?? null) ? $data['transactions'] : [];
+        $metadata = array_diff_key(
+            (array) ($data['metadata'] ?? []),
+            array_flip(self::INTERNAL_METADATA_KEYS),
+        );
+
         return new self(
             id:               (string) $data['id'],
             email:            isset($data['email'])     ? (string) $data['email']     : null,
@@ -51,11 +73,12 @@ final readonly class Customer
             lastName:         isset($data['lastName'])  ? (string) $data['lastName']  : null,
             name:             isset($data['name'])      ? (string) $data['name']      : null,
             country:          isset($data['country'])   ? (string) $data['country']   : null,
-            totalSpend:       (int)   ($data['totalSpend']       ?? 0),
-            transactionCount: (int)   ($data['transactionCount'] ?? 0),
-            metadata:         (array) ($data['metadata']         ?? []),
-            createdAt:        (string) ($data['createdAt'] ?? $data['created_at'] ?? ''),
-            updatedAt:        (string) ($data['updatedAt'] ?? $data['updated_at'] ?? ''),
+            totalSpend:       (int) ($summary['totalAmount'] ?? $data['totalSpend'] ?? 0),
+            transactionCount: (int) ($summary['count'] ?? $data['transactionCount'] ?? 0),
+            metadata:         $metadata,
+            createdAt:        (string) ($data['createdAt'] ?? ''),
+            updatedAt:        (string) ($data['updatedAt'] ?? ''),
+            successfulTransactionCount: (int) ($summary['successCount'] ?? 0),
         );
     }
 

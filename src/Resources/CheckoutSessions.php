@@ -23,17 +23,19 @@ final class CheckoutSessions
      * Create a new checkout session.
      *
      * Required params:
-     *  - amount (int, centimes) — omit or set openAmount=true for open-amount sessions
-     *  - currency (string, default "MAD")
+     *  - successUrl, cancelUrl (string, https://)
      *
      * Optional params:
-     *  - openAmount (bool)
-     *  - reference (string)
-     *  - description (string)
-     *  - successUrl (string)
-     *  - cancelUrl (string)
-     *  - expiresIn (int, seconds, default 3600)
-     *  - metadata (array)
+     *  - amount (int, centimes, 100 to 100000000) — omit or null for an open amount
+     *  - currency (string, "MAD" only, default)
+     *  - customer (array: email, name, phone)
+     *  - lineItems, billingAddress, shippingAddress (arrays)
+     *  - paymentMethods (list: card, cash; default [card])
+     *  - vendorId (uuid), require3ds (bool, default true)
+     *  - metadata (array<string, string>, max 20 keys)
+     *
+     * The session expires 30 minutes after creation (48 hours when cash is offered).
+     * Unknown fields are dropped by the API.
      *
      * @param  array<string, mixed> $params
      * @param  string|null          $idempotencyKey Safely replay the same request

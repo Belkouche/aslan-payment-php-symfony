@@ -41,9 +41,11 @@ final readonly class PaginatedResponse
     {
         $items = array_map($hydrator, $raw['data'] ?? []);
 
-        $meta = $raw['meta'] ?? $raw['pagination'] ?? [];
+        // Envelopes differ per route: `meta` (billing), `pagination` (transactions, customers,
+        // payment links, refunds) or top-level fields with `limit` (vendors).
+        $meta = $raw['meta'] ?? $raw['pagination'] ?? $raw;
 
-        $pageSize = (int) ($meta['pageSize']    ?? $meta['perPage']     ?? count($items));
+        $pageSize = (int) ($meta['pageSize']    ?? $meta['limit'] ?? $meta['perPage'] ?? count($items));
         $total    = (int) ($meta['total']       ?? $meta['totalItems']  ?? count($items));
 
         return new self(
