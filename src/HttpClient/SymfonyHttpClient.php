@@ -141,6 +141,11 @@ final class SymfonyHttpClient implements HttpClientInterface, RawHttpClientInter
                 // Decode the error body so we can surface structured API messages.
                 $decoded = $this->decodeJson($response);
 
+                // The API wraps errors as {"error": {"code", "message", "details"}}.
+                if (isset($decoded['error']) && is_array($decoded['error'])) {
+                    $decoded = $decoded['error'];
+                }
+
                 // Check if we should retry transient server errors
                 if (in_array($statusCode, self::RETRYABLE_STATUSES, true) && $attempt < $this->maxRetries) {
                     $lastException = AslanException::fromApiResponse($statusCode, $decoded, $requestId);

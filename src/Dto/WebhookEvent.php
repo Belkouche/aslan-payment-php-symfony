@@ -92,7 +92,7 @@ final readonly class WebhookEvent
 
     public function asRefund(): Refund
     {
-        return Refund::fromArray($this->data['object'] ?? $this->data);
+        return Refund::fromArray($this->data['refund'] ?? $this->data['object'] ?? $this->data);
     }
 
     public function asPaymentLink(): PaymentLink

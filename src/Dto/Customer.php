@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Aslan\Payment\Dto;
 
 /**
- * Represents a customer who has completed at least one payment.
+ * Represents a merchant customer (created via the API or from a payment).
  */
 final readonly class Customer
 {

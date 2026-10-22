@@ -12,7 +12,7 @@ namespace Aslan\Payment;
  *  - AUTHORIZATION_ERROR    — authenticated but not allowed
  *  - VALIDATION_ERROR       — request payload failed validation
  *  - NOT_FOUND              — resource does not exist
- *  - CONFLICT               — idempotency key reuse with different params
+ *  - CONFLICT               — conflicting resource (e.g. duplicate customer email)
  *  - RATE_LIMIT_ERROR       — too many requests
  *  - GATEWAY_ERROR          — upstream payment provider error
  *  - SERVER_ERROR           — unexpected server-side error (5xx)
@@ -104,6 +104,11 @@ final class AslanException extends \RuntimeException
      */
     public static function fromApiResponse(int $httpStatus, array $body, ?string $requestId = null): self
     {
+        // Accept the API's {"error": {...}} envelope as well as a bare error object.
+        if (isset($body['error']) && is_array($body['error'])) {
+            $body = $body['error'];
+        }
+
         $code    = (string) ($body['code'] ?? 'SERVER_ERROR');
         $message = $body['message'] ?? 'An error occurred';
         $details = $body['details'] ?? $body['errors'] ?? [];

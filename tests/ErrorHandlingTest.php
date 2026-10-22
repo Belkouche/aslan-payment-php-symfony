@@ -67,6 +67,54 @@ final class ErrorHandlingTest extends TestCase
         }
     }
 
+    public function test_duplicate_customer_email_surfaces_as_conflict(): void
+    {
+        // Exact body the API sends for a duplicate email (error-handler envelope).
+        $client = $this->client([
+            new MockResponse(
+                '{"error":{"code":"CONFLICT","message":"A customer with this email already exists"}}',
+                ['http_code' => 409, 'response_headers' => ['content-type' => 'application/json', 'x-request-id' => 'req_409']],
+            ),
+        ], $requests);
+
+        try {
+            $client->customers->create(['email' => 'jane@example.com', 'name' => 'Jane Doe']);
+            self::fail('Expected AslanException');
+        } catch (AslanException $e) {
+            self::assertSame('CONFLICT', $e->errorCode);
+            self::assertSame('CONFLICT', $e->getErrorCode());
+            self::assertSame(409, $e->getCode());
+            self::assertSame(409, $e->httpStatus);
+            self::assertSame('A customer with this email already exists', $e->getMessage());
+            self::assertSame('req_409', $e->requestId);
+        }
+
+        self::assertCount(1, $requests, '409 must not be retried');
+        self::assertSame('POST', $requests[0]['method']);
+        self::assertSame('https://api.aslanpay.ma/pay/api/v1/customers', $requests[0]['url']);
+        self::assertSame('{"email":"jane@example.com","name":"Jane Doe"}', $requests[0]['options']['body']);
+    }
+
+    public function test_api_400_envelope_keeps_api_error_code_and_details(): void
+    {
+        $client = $this->client([
+            new MockResponse(
+                '{"error":{"code":"VALIDATION_ERROR","message":"Invalid customer data","details":[{"field":"phone","message":"phone must match +212XXXXXXXXX"}]}}',
+                ['http_code' => 400, 'response_headers' => ['content-type' => 'application/json']],
+            ),
+        ]);
+
+        try {
+            $client->customers->create(['phone' => '0612345678']);
+            self::fail('Expected AslanException');
+        } catch (AslanException $e) {
+            self::assertSame('VALIDATION_ERROR', $e->errorCode);
+            self::assertSame(400, $e->getCode());
+            self::assertSame('Invalid customer data', $e->getMessage());
+            self::assertSame([['field' => 'phone', 'message' => 'phone must match +212XXXXXXXXX']], $e->details);
+        }
+    }
+
     public function test_not_found_maps_to_not_found(): void
     {
         $client = $this->client([

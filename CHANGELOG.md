@@ -9,6 +9,7 @@
   - `$aslan->billingAttempts` — `list`, `receipt`, `receiptPdf` (raw bytes), `facture`.
   - `$aslan->invoices` — `list`, `retrieve`, `pdf` (raw bytes).
   - DTOs: `Plan`, `Subscription`, `SubscriptionCustomer`, `SubscriptionCard`, `SubscriptionCheckout`, `SubscriptionPaymentLink`, `SubscriptionPlanChange`, `SubscriptionStatusChange`, `SubscriptionPriceOverride`, `BillingAttempt`, `Invoice`, `InvoiceLine`, `DocumentData`.
+- `$aslan->customers->create()` (`POST /api/v1/customers`): email and/or `+212XXXXXXXXX` phone, optional name and metadata; a duplicate email surfaces as `AslanException` (HTTP 409, `CONFLICT`). No idempotency key (not supported by the API on this route).
 - `subscription.*` webhook events: `WebhookEvent::asSubscription()`, `WebhookEvent::isSubscriptionEvent()`.
 - `RawHttpClientInterface` (implemented by `SymfonyHttpClient`) for PDF downloads.
 - `AslanException::$errorCode` / `getErrorCode()`.
@@ -19,6 +20,12 @@
 - `WebhookEvent` reads the event type from the payload's `event` field and parses the ISO 8601 `createdAt` (previously cast to an int, yielding the year); `asTransaction()` also reads `data.transaction`.
 - Body-less `POST`/`DELETE` requests no longer send `Content-Type: application/json`, which the API rejects with an empty body.
 - `PaginatedResponse::$totalPages` is derived from `total`/`pageSize` when the API omits it.
+- API errors are read from the API's `{"error": {"code", "message", "details"}}` envelope (in `SymfonyHttpClient` and `AslanException::fromApiResponse()`). Previously the API message was replaced by a generic one and every 400 surfaced as `SERVER_ERROR` instead of `VALIDATION_ERROR`.
+- `WebhookConfig::$signingSecret` is read from the API's `secret` field (full `whsec_...` value only; the masked value returned on later calls yields null); a missing `id` no longer raises an undefined-key warning.
+- `WebhookEvent::asRefund()` reads `data.refund`, where the API puts refund payloads.
+
+### Documentation
+- README and AGENTS.md fact-checked against the API: idempotency support per route, HTTPS-only URLs, subscription lifecycle (dunning schedule, `past_due`, which actions send which webhooks), `subscription.plan_change_failed` meaning, cash events, webhook delivery retries/timeout, request parameters of 0.1.0-era resources, and a "Known gaps in 0.2.0" list of DTO fields that do not match the API yet.
 
 ### Security / requirements
 - PHP constraint is now `~8.2.35 || ~8.3.36 || ~8.4.27 || >=8.5.12`: Composer refuses to install on PHP builds vulnerable to CVE-2026-109618 / CVE-2026-109619 ("php2shell", fixed 2026-10-21).

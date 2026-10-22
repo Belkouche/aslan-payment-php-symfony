@@ -49,12 +49,18 @@ final readonly class WebhookConfig
      */
     public static function fromArray(array $data): self
     {
+        // The API returns the secret as `secret`: in full (whsec_...) only on the
+        // first configuration, masked (****abcd) afterwards. Only a full secret is
+        // exposed as signingSecret.
+        $secret = $data['signingSecret'] ?? $data['secret'] ?? null;
+        $secret = is_string($secret) && str_starts_with($secret, 'whsec_') ? $secret : null;
+
         return new self(
-            id:            (string) $data['id'],
+            id:            (string) ($data['id']         ?? ''),
             url:           (string) ($data['url']        ?? ''),
             status:        (string) ($data['status']     ?? 'active'),
             events:        (array)  ($data['events']     ?? []),
-            signingSecret: isset($data['signingSecret']) ? (string) $data['signingSecret'] : null,
+            signingSecret: $secret,
             apiVersion:    (string) ($data['apiVersion'] ?? $data['api_version'] ?? '2024-01'),
             createdAt:     (string) ($data['createdAt']  ?? $data['created_at'] ?? ''),
             updatedAt:     (string) ($data['updatedAt']  ?? $data['updated_at'] ?? ''),

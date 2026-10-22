@@ -381,6 +381,56 @@ final class AslanTest extends TestCase
         self::assertSame('Jane Doe', $customer->displayName());
     }
 
+    public function test_customer_create_sends_params_and_parses_response(): void
+    {
+        $params = [
+            'email'    => 'jane@example.com',
+            'phone'    => '+212612345678',
+            'name'     => 'Jane Doe',
+            'metadata' => ['crmId' => '42'],
+        ];
+
+        $this->mockHttp
+            ->expects(self::once())
+            ->method('request')
+            ->with('POST', 'https://api.aslanpay.ma/pay/api/v1/customers', $params, [], [])
+            ->willReturn(['data' => [
+                'id'        => '33333333-3333-4333-8333-333333333333',
+                'email'     => 'jane@example.com',
+                'name'      => 'Jane Doe',
+                'phone'     => '+212612345678',
+                'metadata'  => ['crmId' => '42'],
+                'createdAt' => '2026-10-22T09:00:00.000Z',
+                'updatedAt' => '2026-10-22T09:00:00.000Z',
+            ]]);
+
+        $customer = $this->client->customers->create($params);
+
+        self::assertInstanceOf(Customer::class, $customer);
+        self::assertSame('33333333-3333-4333-8333-333333333333', $customer->id);
+        self::assertSame('jane@example.com', $customer->email);
+        self::assertSame('+212612345678', $customer->phone);
+        self::assertSame('Jane Doe', $customer->name);
+        self::assertSame(['crmId' => '42'], $customer->metadata);
+        self::assertSame('2026-10-22T09:00:00.000Z', $customer->createdAt);
+        self::assertSame(0, $customer->transactionCount);
+        self::assertSame('Jane Doe', $customer->displayName());
+    }
+
+    public function test_customer_create_phone_only(): void
+    {
+        $this->mockHttp
+            ->expects(self::once())
+            ->method('request')
+            ->with('POST', 'https://api.aslanpay.ma/pay/api/v1/customers', ['phone' => '+212612345678'], [], [])
+            ->willReturn(['data' => ['id' => 'c1', 'email' => null, 'name' => null, 'phone' => '+212612345678', 'metadata' => []]]);
+
+        $customer = $this->client->customers->create(['phone' => '+212612345678']);
+
+        self::assertNull($customer->email);
+        self::assertSame('+212612345678', $customer->displayName());
+    }
+
     // ------------------------------------------------------------------
     // ApiKeys
     // ------------------------------------------------------------------
@@ -456,6 +506,23 @@ final class AslanTest extends TestCase
         $config = WebhookConfig::fromArray(array_merge($this->webhookConfigPayload(), ['events' => []]));
 
         self::assertTrue($config->subscribesTo('any_event.type'));
+    }
+
+    public function test_webhook_config_reads_api_secret_field(): void
+    {
+        // Shape actually returned by POST /api/v1/webhooks/config on first configuration.
+        $config = WebhookConfig::fromArray([
+            'url'    => 'https://example.com/webhook',
+            'secret' => 'whsec_0123abcd',
+            'events' => ['payment.succeeded'],
+        ]);
+
+        self::assertSame('whsec_0123abcd', $config->signingSecret);
+        self::assertSame('', $config->id);
+
+        // Later calls return the secret masked: never expose that as the signing secret.
+        $masked = WebhookConfig::fromArray(['url' => 'https://example.com/webhook', 'secret' => '**********abcd']);
+        self::assertNull($masked->signingSecret);
     }
 
     // ------------------------------------------------------------------
@@ -553,6 +620,20 @@ final class AslanTest extends TestCase
         self::assertSame('cs_abc123', $session->id);
     }
 
+    public function test_webhook_event_as_refund_reads_data_refund(): void
+    {
+        $event = WebhookEvent::fromArray([
+            'id'        => 'evt_r1',
+            'event'     => 'refund.updated',
+            'createdAt' => '2026-10-22T09:00:00.000Z',
+            'data'      => ['refund' => $this->refundPayload()],
+        ]);
+
+        $refund = $event->asRefund();
+
+        self::assertSame($this->refundPayload()['id'], $refund->id);
+    }
+
     // ------------------------------------------------------------------
     // AslanException
     // ------------------------------------------------------------------
@@ -568,6 +649,22 @@ final class AslanTest extends TestCase
         $validEx = AslanException::validationError('Invalid amount', ['amount' => 'must be positive']);
         self::assertSame('VALIDATION_ERROR', $validEx->errorCode);
         self::assertNotEmpty($validEx->details);
+    }
+
+    public function test_exception_from_api_response_unwraps_error_envelope(): void
+    {
+        $ex = AslanException::fromApiResponse(400, [
+            'error' => [
+                'code'    => 'VALIDATION_ERROR',
+                'message' => 'Invalid customer data',
+                'details' => [['field' => 'phone', 'message' => 'phone must match +212XXXXXXXXX']],
+            ],
+        ]);
+
+        self::assertSame('VALIDATION_ERROR', $ex->errorCode);
+        self::assertSame('Invalid customer data', $ex->getMessage());
+        self::assertSame(400, $ex->getCode());
+        self::assertSame([['field' => 'phone', 'message' => 'phone must match +212XXXXXXXXX']], $ex->details);
     }
 
     public function test_exception_from_api_response(): void

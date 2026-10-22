@@ -11,8 +11,8 @@ use Aslan\Payment\Dto\PaginatedResponse;
 /**
  * Customers resource.
  *
- * Customers are read-only from the merchant API. They are automatically
- * created or matched when a payment is completed.
+ * Create a customer explicitly (e.g. before starting a subscription), or let
+ * the API create/match one from the customer email given to a checkout session.
  *
  * @see https://docs.aslanpay.ma/api/customers
  */
@@ -21,14 +21,35 @@ final class Customers
     public function __construct(private readonly Aslan $client) {}
 
     /**
+     * Create a customer for the authenticated merchant.
+     *
+     * Params (at least one of email or phone is required):
+     *  - email (string) — unique per merchant; a duplicate returns HTTP 409
+     *    (AslanException, errorCode CONFLICT)
+     *  - phone (string) — Moroccan format +212XXXXXXXXX
+     *  - name (string, max 200)
+     *  - metadata (array<string, string>)
+     *
+     * The API does not support an Idempotency-Key on this route.
+     *
+     * @param  array<string, mixed> $params
+     */
+    public function create(array $params): Customer
+    {
+        $response = $this->client->request('POST', '/api/v1/customers', $params);
+
+        return Customer::fromArray($response['data'] ?? $response);
+    }
+
+    /**
      * List customers with optional filters.
      *
      * Query params:
      *  - page (int, default 1)
      *  - pageSize (int, default 20, max 100)
-     *  - search (string) — search by email, phone, or name
-     *  - from (string, ISO 8601) — filter by createdAt
-     *  - to (string, ISO 8601)
+     *  - search (string, max 255) — search by email, phone, or name
+     *  - sortBy (string) — createdAt | email | name (default createdAt)
+     *  - sortOrder (string) — asc | desc (default desc)
      *
      * @param  array<string, mixed>   $query
      * @return PaginatedResponse<Customer>
