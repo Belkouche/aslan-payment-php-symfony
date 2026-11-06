@@ -39,6 +39,9 @@ final class Subscriptions
      *  - priceOverride (int, centimes, 1 <= value <= plan amount)
      *  - priceOverrideMonths (int, >= 1) — time-boxes priceOverride
      *  - metadata (array<string, string>) — keys starting with "__" are dropped
+     *  - providerAccount (string, ^[a-z0-9][a-z0-9-]{0,31}$) — alias of an additional PSP account (must be a Payzone
+     *    account that allows recurring payments); omit or "default" for the default account. Errors:
+     *    PROVIDER_ACCOUNT_NOT_FOUND / _INACTIVE / _UNSUPPORTED / _RECURRING_DISABLED. Renewals always use that account.
      *
      * No-trial plans charge the first period on the Paywall; trial plans only
      * charge an auto-refunded card-verification amount.

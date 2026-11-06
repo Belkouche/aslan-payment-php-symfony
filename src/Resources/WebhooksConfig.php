@@ -36,7 +36,8 @@ final class WebhooksConfig
      *      refund.created, refund.updated,
      *      subscription.renewed, subscription.payment_failed,
      *      subscription.past_due, subscription.cancelled,
-     *      subscription.plan_changed, subscription.plan_change_failed
+     *      subscription.plan_changed, subscription.plan_change_failed,
+     *      subscription.renewal_suspended
      *  - apiVersion (string) — pin the event payload format
      *
      * @param  array<string, mixed> $params

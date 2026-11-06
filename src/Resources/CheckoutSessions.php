@@ -32,6 +32,8 @@ final class CheckoutSessions
      *  - lineItems, billingAddress, shippingAddress (arrays)
      *  - paymentMethods (list: card, cash; default [card])
      *  - vendorId (uuid), require3ds (bool, default true)
+     *  - providerAccount (string, ^[a-z0-9][a-z0-9-]{0,31}$) — alias of one of your additional PSP accounts;
+     *    omit or "default" for the default account. Errors: PROVIDER_ACCOUNT_NOT_FOUND / _INACTIVE / _UNSUPPORTED
      *  - metadata (array<string, string>, max 20 keys)
      *
      * The session expires 30 minutes after creation (48 hours when cash is offered).

@@ -115,6 +115,27 @@ final class ErrorHandlingTest extends TestCase
         }
     }
 
+    public function test_flat_api_error_body_keeps_provider_account_code(): void
+    {
+        $client = $this->client([
+            new MockResponse(
+                '{"statusCode":400,"code":"PROVIDER_ACCOUNT_NOT_FOUND","error":"Bad Request","message":"Unknown providerAccount"}',
+                ['http_code' => 400, 'response_headers' => ['content-type' => 'application/json']],
+            ),
+        ], $requests);
+
+        try {
+            $client->checkoutSessions->create(['amount' => 5000, 'providerAccount' => 'nope']);
+            self::fail('Expected AslanException');
+        } catch (AslanException $e) {
+            self::assertSame('PROVIDER_ACCOUNT_NOT_FOUND', $e->errorCode);
+            self::assertSame(400, $e->getCode());
+            self::assertSame('Unknown providerAccount', $e->getMessage());
+        }
+
+        self::assertStringContainsString('"providerAccount":"nope"', $requests[0]['options']['body']);
+    }
+
     public function test_not_found_maps_to_not_found(): void
     {
         $client = $this->client([
