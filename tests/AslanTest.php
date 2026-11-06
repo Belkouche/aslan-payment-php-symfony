@@ -119,6 +119,16 @@ final class AslanTest extends TestCase
         self::assertSame('https://pay.aslanpay.ma/checkout/tok_abc', $session->url);
     }
 
+    public function test_provider_account_is_mapped_on_dtos(): void
+    {
+        $payload = $this->checkoutSessionPayload() + ['providerAccount' => 'foreign'];
+        self::assertSame('foreign', CheckoutSession::fromArray($payload)->providerAccount);
+        self::assertNull(CheckoutSession::fromArray($this->checkoutSessionPayload())->providerAccount);
+        self::assertSame('store-2', \Aslan\Payment\Dto\Transaction::fromArray(['id' => 't1', 'providerAccount' => 'store-2'])->providerAccount);
+        self::assertSame('default', \Aslan\Payment\Dto\PaymentLink::fromArray(['id' => 'l1', 'providerAccount' => 'default'])->providerAccount);
+        self::assertSame('foreign', \Aslan\Payment\Dto\Subscription::fromArray(['id' => 's1', 'providerAccount' => 'foreign'])->providerAccount);
+    }
+
     public function test_checkout_session_create_with_idempotency_key(): void
     {
         $this->mockHttp

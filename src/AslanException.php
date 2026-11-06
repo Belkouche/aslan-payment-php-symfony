@@ -19,6 +19,8 @@ namespace Aslan\Payment;
  *  - NETWORK_ERROR          — connection / timeout failure
  *  - WEBHOOK_SIGNATURE_ERROR — webhook signature verification failed
  *  - UNSUPPORTED_OPERATION  — the configured HTTP client lacks a needed capability
+ *  - PROVIDER_ACCOUNT_NOT_FOUND / PROVIDER_ACCOUNT_INACTIVE / PROVIDER_ACCOUNT_UNSUPPORTED /
+ *    PROVIDER_ACCOUNT_RECURRING_DISABLED — the `providerAccount` alias was rejected (HTTP 400)
  */
 final class AslanException extends \RuntimeException
 {

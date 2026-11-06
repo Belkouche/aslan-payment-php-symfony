@@ -71,6 +71,12 @@ final readonly class CheckoutSession
          * `transaction.status`. Only `retrieve()` returns it.
          */
         public ?string $transactionStatus = null,
+
+        /**
+         * `default`, or the alias of the PSP account this session is pinned to.
+         * Null when the API does not return it (e.g. a webhook payload where it could not be determined).
+         */
+        public ?string $providerAccount = null,
     ) {}
 
     /**
@@ -99,6 +105,7 @@ final readonly class CheckoutSession
             createdAt:     (string) ($data['createdAt'] ?? ''),
             updatedAt:     (string) ($data['updatedAt'] ?? ''),
             transactionStatus: isset($transaction['status']) ? (string) $transaction['status'] : null,
+            providerAccount: isset($data['providerAccount']) ? (string) $data['providerAccount'] : null,
         );
     }
 

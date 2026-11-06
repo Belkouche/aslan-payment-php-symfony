@@ -86,6 +86,7 @@ final class WebhookSignatureTest extends TestCase
             'subscription.cancelled',
             'subscription.plan_changed',
             'subscription.plan_change_failed',
+            'subscription.renewal_suspended',
         ] as $type) {
             yield $type => [$type];
         }
@@ -105,6 +106,31 @@ final class WebhookSignatureTest extends TestCase
 
         self::assertSame($type, $event->type);
         self::assertSame('sub-1', $event->asSubscription()->id);
+    }
+
+    public function test_renewal_suspended_payload_and_payment_provider_account(): void
+    {
+        $body = json_encode([
+            'id'        => 'evt_rs',
+            'event'     => 'subscription.renewal_suspended',
+            'createdAt' => '2026-04-01T02:00:05.000Z',
+            'data'      => ['subscription' => [
+                'id'                => 'sub-1',
+                'planId'            => 'plan-1',
+                'reason'            => 'PROVIDER_ACCOUNT_RECURRING_DISABLED',
+                'skippedPeriodStart' => '2026-04-01T00:00:00.000Z',
+                'skippedPeriodEnd'  => '2026-05-01T00:00:00.000Z',
+                'nextBillingAt'     => '2026-05-01T00:00:00.000Z',
+            ]],
+        ], JSON_THROW_ON_ERROR);
+
+        $event = Aslan::webhooks(self::SECRET)->constructEvent($body, self::sign($body, time()));
+
+        self::assertTrue($event->isSubscriptionEvent());
+        self::assertSame('sub-1', $event->asSubscription()->id);
+        self::assertSame('2026-05-01T00:00:00.000Z', $event->asSubscription()->nextBillingAt);
+        self::assertSame('PROVIDER_ACCOUNT_RECURRING_DISABLED', $event->data['subscription']['reason']);
+        self::assertSame('2026-04-01T00:00:00.000Z', $event->data['subscription']['skippedPeriodStart']);
     }
 
     public function test_sdk_generated_header_matches_api_format(): void

@@ -79,6 +79,12 @@ final readonly class Transaction
          * @var list<array<string, mixed>>
          */
         public array   $refunds = [],
+
+        /**
+         * `default`, or the alias of the PSP account that processed this payment.
+         * Null when the API does not return it (e.g. a webhook payload where it could not be determined).
+         */
+        public ?string $providerAccount = null,
     ) {}
 
     /**
@@ -119,6 +125,7 @@ final readonly class Transaction
             failedAt:          isset($data['failedAt'])     ? (string) $data['failedAt']     : null,
             errorMessage:      isset($data['errorMessage']) ? (string) $data['errorMessage'] : null,
             refunds:           $refunds,
+            providerAccount:   isset($data['providerAccount']) ? (string) $data['providerAccount'] : null,
         );
     }
 

@@ -79,6 +79,12 @@ final readonly class PaymentLink
         public string  $purpose = 'payment',
 
         public ?string $vendorId = null,
+
+        /**
+         * `default`, or the alias of the PSP account used for this link's payments.
+         * Null when the API does not return it (e.g. a webhook payload where it could not be determined).
+         */
+        public ?string $providerAccount = null,
     ) {}
 
     /**
@@ -116,6 +122,7 @@ final readonly class PaymentLink
             maxAmount:    isset($data['maxAmount']) ? (int) $data['maxAmount'] : null,
             purpose:      (string) ($data['purpose'] ?? 'payment'),
             vendorId:     isset($data['vendorId']) ? (string) $data['vendorId'] : null,
+            providerAccount: isset($data['providerAccount']) ? (string) $data['providerAccount'] : null,
         );
     }
 

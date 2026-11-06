@@ -17,10 +17,15 @@ namespace Aslan\Payment\Dto;
  *  - refund.created, refund.updated
  *  - subscription.renewed, subscription.payment_failed, subscription.past_due,
  *    subscription.cancelled, subscription.plan_changed,
- *    subscription.plan_change_failed
+ *    subscription.plan_change_failed, subscription.renewal_suspended
  *
  * `subscription.*` events carry `{ subscription, transaction? }` in $data —
  * use asSubscription() and $data['transaction'].
+ * `subscription.renewal_suspended` carries `data.subscription` = { id, planId, reason
+ * ("PROVIDER_ACCOUNT_RECURRING_DISABLED"), skippedPeriodStart, skippedPeriodEnd, nextBillingAt };
+ * read `reason` and the skipped period from `$event->data['subscription']`.
+ * `payment.*` events carry `providerAccount` ("default" or an alias; null if undetermined) in
+ * `data.transaction`.
  */
 final readonly class WebhookEvent
 {

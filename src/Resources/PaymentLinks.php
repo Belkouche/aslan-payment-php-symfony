@@ -31,6 +31,8 @@ final class PaymentLinks
      *  - description (string, max 500)
      *  - maxPayments (int, >= 1) — limit the number of payment attempts
      *  - vendorId (uuid)
+     *  - providerAccount (string, ^[a-z0-9][a-z0-9-]{0,31}$) — alias of one of your additional PSP accounts;
+     *    omit or "default" for the default account. Errors: PROVIDER_ACCOUNT_NOT_FOUND / _INACTIVE / _UNSUPPORTED
      *  - expiresAt (string, ISO 8601)
      *  - metadata (array<string, string>)
      *

@@ -61,6 +61,12 @@ final readonly class Subscription
 
         public string                $createdAt,
         public string                $updatedAt,
+
+        /**
+         * `default`, or the alias of the PSP account this subscription renews on.
+         * Null when the API does not return it (e.g. a webhook payload where it could not be determined).
+         */
+        public ?string $providerAccount = null,
     ) {}
 
     /**
@@ -89,6 +95,7 @@ final readonly class Subscription
             card:               is_array($data['card'] ?? null)     ? SubscriptionCard::fromArray($data['card']) : null,
             createdAt:          (string) ($data['createdAt'] ?? $data['created_at'] ?? ''),
             updatedAt:          (string) ($data['updatedAt'] ?? $data['updated_at'] ?? ''),
+            providerAccount:    isset($data['providerAccount']) ? (string) $data['providerAccount'] : null,
         );
     }
 

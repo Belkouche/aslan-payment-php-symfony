@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Several PSP accounts per merchant (aslan-payment-api PR #42): optional `providerAccount` alias (`^[a-z0-9][a-z0-9-]{0,31}$`, `default` = default account) on `checkoutSessions->create`, `paymentLinks->create` and `subscriptions->create` (documented; params are passed through as-is).
+- `providerAccount` (`?string`) on the `CheckoutSession`, `Transaction`, `PaymentLink` and `Subscription` DTOs. Payment webhook payloads carry it in `data.transaction` (may be null).
+- Error codes `PROVIDER_ACCOUNT_NOT_FOUND`, `PROVIDER_ACCOUNT_INACTIVE`, `PROVIDER_ACCOUNT_UNSUPPORTED`, `PROVIDER_ACCOUNT_RECURRING_DISABLED` (HTTP 400, available as `AslanException::$errorCode`).
+- `subscription.renewal_suspended` webhook event (read `reason`, `skippedPeriodStart`, `skippedPeriodEnd` from `$event->data['subscription']`; `asSubscription()` exposes `id`, `planId`, `nextBillingAt`).
+
 ## 0.2.0 (2026-10-22)
 
 ### Added

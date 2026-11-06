@@ -688,6 +688,7 @@ function handle(\Aslan\Payment\Dto\WebhookEvent $event, \PDO $db): void
 | `subscription.past_due` | The 3rd consecutive renewal failed, or the trial-end charge failed; the subscription is now `past_due` (sent once per entry into `past_due`) | Apply your grace policy |
 | `subscription.cancelled` | The API ended the subscription: `data.subscription.cancelReason` is `period_end`, `dunning` or `abandoned`. **Not** sent for an immediate `cancel()` | Revoke access |
 | `subscription.plan_changed` | A `changePlan()` call was accepted (immediately, for all modes; `effectiveAt` tells when it applies) | Update the entitlements of the customer |
+| `subscription.renewal_suspended` | A renewal came due but the subscription's PSP account no longer allows recurring payments; nothing was charged and the skipped period is never charged later. `status` is unchanged, no dunning; `data.subscription` is `{ id, planId, reason: "PROVIDER_ACCOUNT_RECURRING_DISABLED", skippedPeriodStart, skippedPeriodEnd, nextBillingAt }` | Tell the customer, or re-enable recurring on the account |
 | `subscription.plan_change_failed` | A scheduled `period_end` plan change could not be applied because the target plan was archived; the subscription renewed on its current plan | Tell the customer, pick another plan |
 
 Payloads are `{"id", "event", "createdAt", "data"}`. All amounts are integers in centimes, `payment.*` included. `payment.succeeded` / `payment.failed` carry `data.transaction` with `id`, `amount`, `currency`, `status`, `providerRef`, `metadata`, `paidAt` or `failedAt` (plus `vendorId` / split fields for marketplace payments). `payment.*` events carry `data.transaction`, `refund.*` events carry `data.refund`, `subscription.*` events carry `data.subscription` (plus `data.transaction` for `renewed` / `payment_failed`). `asTransaction()` reads `data.transaction`, `asRefund()` reads `data.refund`, `asSubscription()` reads `data.subscription` (each falls back to `data.object`, then `data`). Always rely on `$event->data` / `$event->rawPayload` when in doubt. Event names such as `checkout_session.completed` or `transaction.captured` (used in 0.1.0-era docs) **do not exist**; do not subscribe to or switch on them.
@@ -736,8 +737,12 @@ try {
 | `NETWORK_ERROR` | 0 | Connection or timeout failure | Retry with the same idempotency key |
 | `WEBHOOK_SIGNATURE_ERROR` | 0 | Webhook verification failed | Reject with 400 |
 | `UNSUPPORTED_OPERATION` | 0 | Custom HTTP client cannot download PDFs | Implement `RawHttpClientInterface` |
+| `PROVIDER_ACCOUNT_NOT_FOUND` | 400 | `providerAccount` names no account of your merchant | Fix the alias |
+| `PROVIDER_ACCOUNT_INACTIVE` | 400 | The account is deactivated (checked at creation and again when the customer pays) | Re-activate it or use another account |
+| `PROVIDER_ACCOUNT_UNSUPPORTED` | 400 | The account's provider cannot take this request (e.g. `cash` on a card account, a subscription on a non-Payzone account) | Use a compatible account |
+| `PROVIDER_ACCOUNT_RECURRING_DISABLED` | 400 | The account does not allow recurring payments (subscription create, change card, repay) | Enable recurring on the account |
 
-The API answers errors as `{"error": {"code", "message", "details"}}`; the SDK unwraps that envelope. For 401, 403, 404, 409, 422 and 429 the SDK sets `errorCode` from the HTTP status as shown above; for any other status (including 400 and 5xx) it uses the API's own `code` unchanged, so never assume the list above is exhaustive.
+The API answers errors either flat (`{"statusCode", "code", "error", "message"}`, as observed in production) or as `{"error": {"code", "message", "details"}}`; the SDK reads both. For 401, 403, 404, 409, 422 and 429 the SDK sets `errorCode` from the HTTP status as shown above; for any other status (including 400 and 5xx) it uses the API's own `code` unchanged, so never assume the list above is exhaustive.
 
 **Automatic retries.** The bundled client retries up to `maxRetries` times (default 2) with exponential back-off (500 ms, 1 s, ... capped at 5 s) on HTTP 408, 429, 500, 502, 503, 504 and on network errors, for every method including `POST`. Because a retried create might already have succeeded, pass an `idempotencyKey` to the create calls the API deduplicates (checkout sessions, payment links, refunds). For other creates (subscriptions, customers, plans, ...) a retry after a lost response can create a duplicate; if that matters, set `maxRetries: 0` on the client you use for them and reconcile yourself.
 
@@ -801,7 +806,7 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 
 | Method | Returns | Notes |
 |---|---|---|
-| `create(array $params, ?string $idempotencyKey = null)` | `CheckoutSession` | `successUrl`, `cancelUrl` required (`https://`); `amount` (centimes, 100 to 100 000 000; omit or null for an open amount), `currency` (MAD only, default), optional `customer` (`email`, `name`, `phone`), `lineItems`, `billingAddress`, `shippingAddress`, `paymentMethods` (`card`, `cash`; default `card`), `vendorId`, `require3ds` (default true), `metadata`. Expires after 30 minutes (48 h with cash) |
+| `create(array $params, ?string $idempotencyKey = null)` | `CheckoutSession` | `successUrl`, `cancelUrl` required (`https://`); `amount` (centimes, 100 to 100 000 000; omit or null for an open amount), `currency` (MAD only, default), optional `customer` (`email`, `name`, `phone`), `lineItems`, `billingAddress`, `shippingAddress`, `paymentMethods` (`card`, `cash`; default `card`), `vendorId`, `providerAccount` (alias of an additional PSP account, `^[a-z0-9][a-z0-9-]{0,31}$`; omit or `default` for the default account), `require3ds` (default true), `metadata`. Expires after 30 minutes (48 h with cash) |
 | `retrieve(string $id)` | `CheckoutSession` | adds `successUrl`, `cancelUrl`, `metadata`, `transactionId`, `transactionStatus` |
 
 ### `$aslan->transactions` (`Transactions`, read-only)
@@ -817,14 +822,14 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 
 | Method | Returns | Notes |
 |---|---|---|
-| `create(array $params, ?string $idempotencyKey = null)` | `PaymentLink` | all optional: `amount` (centimes; omit for an open amount), `minAmount`, `maxAmount`, `currency` (MAD), `description` (max 500), `maxPayments` (limit on payment attempts), `vendorId`, `expiresAt`, `metadata` |
+| `create(array $params, ?string $idempotencyKey = null)` | `PaymentLink` | all optional: `amount` (centimes; omit for an open amount), `minAmount`, `maxAmount`, `currency` (MAD), `description` (max 500), `maxPayments` (limit on payment attempts), `vendorId`, `providerAccount` (alias of an additional PSP account, `^[a-z0-9][a-z0-9-]{0,31}$`; omit or `default` for the default account), `expiresAt`, `metadata` |
 | `list(array $query = [])` | `PaginatedResponse<PaymentLink>` | filter `status`: active, inactive, expired, finalized (paid) |
 | `retrieve(string $id)` | `PaymentLink` | |
 | `update(string $id, array $params)` | `PaymentLink` | only `description`, `status` (active, inactive), `maxPayments`, `expiresAt`, `metadata`; an expired link cannot be updated (409) |
 | `delete(string $id)` | `bool` | soft delete (status becomes `inactive`) |
 | `getQrCode(string $id)` | `array` | `dataUri` (base64 PNG data URI), `mimeType` |
 
-`PaymentLink`: `id`, `url`, `shortCode`, `status`, `purpose` (`payment`, or `change_card` / `repay` for links minted by subscriptions), `amount`, `minAmount`, `maxAmount`, `currency`, `openAmount` (`amount === null`), `description`, `maxPayments`, `paymentCount` (payment attempts started from the link), `vendorId`, `expiresAt`, `metadata`, `createdAt`, `updatedAt`; helpers `isActive()`, `isFinalized()` (paid), `hasReachedMaxUses()` (`paymentCount >= maxPayments`). Deprecated aliases: `title` (= `description`), `slug` (= `shortCode`), `maxUses` (= `maxPayments`), `usageCount` (= `paymentCount`); `successUrl` / `cancelUrl` are always null.
+`PaymentLink`: `id`, `url`, `shortCode`, `status`, `purpose` (`payment`, or `change_card` / `repay` for links minted by subscriptions), `amount`, `minAmount`, `maxAmount`, `currency`, `openAmount` (`amount === null`), `description`, `maxPayments`, `paymentCount` (payment attempts started from the link), `vendorId`, `providerAccount`, `expiresAt`, `metadata`, `createdAt`, `updatedAt`; helpers `isActive()`, `isFinalized()` (paid), `hasReachedMaxUses()` (`paymentCount >= maxPayments`). Deprecated aliases: `title` (= `description`), `slug` (= `shortCode`), `maxUses` (= `maxPayments`), `usageCount` (= `paymentCount`); `successUrl` / `cancelUrl` are always null.
 
 ### `$aslan->refunds` (`Refunds`)
 
@@ -898,7 +903,7 @@ All methods throw `AslanException` on failure. `list()` methods return `Paginate
 
 | Method | Returns | Notes |
 |---|---|---|
-| `create(array $params)` | `SubscriptionCheckout` | `planId`, `customerId`, `returnUrl`, `cancelUrl`, `callbackUrl` required (URLs `https://`; `callbackUrl` ignored); optional `priceOverride`, `priceOverrideMonths`, `metadata` |
+| `create(array $params)` | `SubscriptionCheckout` | `planId`, `customerId`, `returnUrl`, `cancelUrl`, `callbackUrl` required (URLs `https://`; `callbackUrl` ignored); optional `priceOverride`, `priceOverrideMonths`, `metadata`, `providerAccount` (alias of an additional PSP account, `^[a-z0-9][a-z0-9-]{0,31}$`; omit or `default` for the default account) (a Payzone account that allows recurring payments) |
 | `list(array $query = [])` | `PaginatedResponse<Subscription>` | filters `status`, `customerId`, `planId` |
 | `retrieve(string $id)` | `Subscription` | includes plan, customer, card |
 | `update(string $id, array $params)` | `SubscriptionPriceOverride` | `priceOverride`, `priceOverrideMonths`; props `id`, `priceOverride`, `priceOverrideUntil` |
